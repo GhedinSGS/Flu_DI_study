@@ -1,0 +1,2051 @@
+---
+title: "mRNA-miRNA_differential-expression-and-network-analysis"
+author: "Chang Wang"
+date: "8/12/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+require("knitr")
+opts_knit$set(root.dir="~/Documents/Mice_DI_infection_ExtendedExperiments_2019-2020/Writing/Code/R/")
+```
+
+###### Load packages ######
+```{r warning=FALSE, message=FALSE}
+library(DESeq2)
+library(edgeR)
+library(ggplot2)
+library(dplyr)
+library(pheatmap)
+library(RColorBrewer)
+library(PoiClaClu)
+library(genefilter)
+library(apeglm)
+library(reshape2)
+library(gplots)
+library(WGCNA)
+```
+
+###### mRNA ######
+#### Load expression data and annotation ####
+## Metadata ##
+```{r warning=FALSE, message=FALSE}
+metadata <- read.csv("../sequencing_analysis_sample_metadata.csv", stringsAsFactors=FALSE)
+
+```
+
+
+## Expression data ##
+```{r warning=FALSE, message=FALSE}
+data <- read.table("3_featureCount_STARalignment/DIinKOmice_mRNAseq_counts_06132020.txt",
+                   sep="\t", header=TRUE, stringsAsFactors=FALSE)
+colnames(data) <- gsub("...2_STAR_alignment.", "", colnames(data))
+colnames(data) <- gsub(".Aligned.out.bam", "", colnames(data))
+for (i in 7:ncol(data)) {
+  colnames(data)[i] <- strsplit(colnames(data)[i], split="\\.")[[1]][1]
+}
+data <- data[, c(1, 7:ncol(data))]
+colnames(data) <- gsub("_", "-", colnames(data))
+
+rownames(data) <- data$Geneid
+data$Geneid <- NULL
+data <- data[, match(metadata$Sample.ID, colnames(data))]
+
+AR_mice_data <- data[, c(1:14)]
+LR_mice_data <- data[, c(15:27)]
+ALR_mice_data <- data[, c(28:36)]
+
+# Exclude viral reads
+AR_mice_data <- AR_mice_data[1:(nrow(AR_mice_data)-8), ]
+LR_mice_data <- LR_mice_data[1:(nrow(LR_mice_data)-8), ]
+ALR_mice_data <- ALR_mice_data[1:(nrow(ALR_mice_data)-8), ]
+host_data <- data[1:(nrow(data)-8), ]
+
+```
+
+
+## Gene annotation data ##
+```{r warning=FALSE, message=FALSE}
+mouse_geneid_name_list <- read.csv("../../Mice_DI_infection_Mirella_Oct-2018/Expression_data_re-analysis_2020/Mus_musculus.GRCm38.99_geneid-name-list.txt", stringsAsFactors=FALSE)
+colnames(mouse_geneid_name_list) <- c("Geneid", "Genename")
+
+```
+
+
+
+#### Exploratory visualization of all samples ####
+## Look at the library size distribution ##
+```{r warning=FALSE, message=FALSE}
+data_libsize <- data.frame("sample"=colnames(data),
+                           "libsize"=as.numeric(colSums(data)), stringsAsFactors=FALSE)
+data_libsize$sample <- factor(data_libsize$sample, levels=data_libsize$sample)
+ggplot(data_libsize, aes(x=sample, y=libsize)) +
+  geom_bar(stat="identity", fill="deepskyblue3") +
+  theme(text=element_text(size=15),
+        axis.text.x=element_text(angle=45, hjust=1),
+        panel.background=element_rect(color="grey90", fill="transparent"),
+        panel.grid.major=element_line(color="grey90"))
+
+```
+
+
+## Sample clustering ##
+```{r warning=FALSE, message=FALSE}
+# Using DESeq2 to prepare input data
+coldata <- metadata
+coldata$combined_condition <- paste(coldata$Strain, coldata$Virus, coldata$Sex, sep="_")
+coldata$cond <- paste(coldata$Strain, coldata$Virus, sep="_")
+coldata$combined_condition <- gsub("/", "", coldata$combined_condition)
+coldata$cond <- gsub("/", "", coldata$cond)
+
+coldata$combined_condition <- factor(coldata$combined_condition,
+                                     levels=unique(coldata$combined_condition))
+
+coldata$cond <- factor(coldata$cond, levels=unique(coldata$cond))
+
+coldata$Strain <- factor(coldata$Strain, levels=c("IFNAR", "IFNLR", "IFNL/AR"))
+
+coldata$Sex <- factor(coldata$Sex, levels=c("M", "F"))
+
+coldata$Virus <- factor(coldata$Virus, levels=c("WT", "DI", "Mock"))
+
+rownames(coldata) <- coldata$Sample.ID
+all(rownames(coldata) == colnames(host_data))
+
+# construct a DESeqData
+dds <- DESeqDataSetFromMatrix(countData=host_data,
+                              colData=coldata, 
+                              design= ~ cond)
+
+# Add additional feature data, e.g. gene names
+featureData <- mouse_geneid_name_list
+rownames(featureData) <- featureData$Geneid
+featureData <- 
+  as.data.frame(featureData[rownames(featureData) %in% 
+                              rownames(host_data), ])
+featureData$Geneid <- NULL
+
+mcols(dds) <- DataFrame(mcols(dds), featureData)
+mcols(dds)
+
+# Pre-filtering based on cpm
+# Use cpm=1 as threshold and at least in two samples
+mean(colSums(host_data)) 
+host_data_cpm <- cpm(host_data)
+
+host_keep <- rowSums(host_data_cpm >= 1) >= 2
+dds <- dds[host_keep, ]
+nrow(dds)
+
+# Check factor levels
+levels(dds$cond)
+
+# The vst and varlance stabilizing transformations
+dds_vst <- varianceStabilizingTransformation(dds, blind=FALSE, fitType="parametric")
+head(assay(dds_vst), 3)
+
+# Estimate size factor
+dds <- estimateSizeFactors(dds)
+
+# Sample-to-sample Euclidean distance 
+sampleDists <- dist(t(assay(dds_vst)))
+sampleDists
+
+sampleDistMatrix <- as.matrix(sampleDists)
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors,
+         fontsize=10)
+
+# Sample-to-sample Poisson distances 
+poisd <- PoissonDistance(t(counts(dds)))
+samplePoisDistMatrix <- as.matrix(poisd$dd)
+rownames(samplePoisDistMatrix) <- colnames(host_data)
+pheatmap(samplePoisDistMatrix,
+         clustering_distance_rows=poisd$dd,
+         clustering_distance_cols=poisd$dd,
+         col=colors,
+         fontsize=10)
+
+# PCA plot
+pcaData <- plotPCA(dds_vst, intgroup=c("Strain", "Sex", "Virus", "cond", "combined_condition"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=Virus, shape=Strain, label=Sex)) +
+  geom_jitter(size=5, stroke=2) +
+  geom_text(color="black") +
+  xlab(paste0("PC1: ", percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ", percentVar[2],"% variance")) +
+  labs(color="Condition", shape="Mouse strain") +
+  scale_color_manual(values=c("#27AAE1", "#FE8500", "#d68adf")) +
+  scale_shape_manual(values=c(1, 8, 9)) + 
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+# MDS plot
+mds <- as.data.frame(colData(dds_vst))  %>% cbind(cmdscale(sampleDistMatrix))
+ggplot(mds, aes(x=`1`, y=`2`, color=Virus, shape=Strain, label=Sex)) +
+  geom_jitter(size=5, stroke=2) +
+  geom_text(color="black") +
+  labs(color="Condition", shape="Mouse strain", x="MDS_1", y="MDS_2") +
+  scale_color_manual(values=c("#27AAE1", "#FE8500", "#d68adf")) +
+  scale_shape_manual(values=c(1, 8, 9)) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+# clean up the environment
+rm(dds, dds_vst, host_data_cpm, mds, pcaData, poisd, sampleDistMatrix, samplePoisDistMatrix, host_keep, i, percentVar, sampleDists, colors)
+
+```
+
+
+
+#### Plot viral read percentage for each sample ####
+```{r warning=FALSE, message=FALSE}
+data_prob <- 100 * prop.table(as.matrix(data), margin=2)
+
+viral_data <- data_prob[(nrow(data_prob)-7):nrow(data_prob), ]
+rownames(viral_data) <- c("PB2", "PB1", "PA", "HA", "NP", "NA", "M", "NS")
+viral_data_sum <- data.frame("sampleID"=colnames(viral_data),
+                             "viral_percentage_sum"=colSums(viral_data))
+lib_virus <- merge(data_libsize, viral_data_sum, by.x="sample", by.y="sampleID")
+
+viral_data <- as.data.frame(t(viral_data))
+viral_data$sampleID <- rownames(viral_data)
+lib_virus <- merge(lib_virus, viral_data, by.x="sample", by.y="sampleID")
+write.csv(lib_virus, file="sample_lib-size_viral-percentage.csv")
+
+coldata_v2 <- merge(coldata, lib_virus, by.x="Sample.ID", by.y="sample")
+
+# plot sum of viral read percentage in each sample as points
+coldata_v2$strain_virus <- paste(coldata_v2$Strain, coldata_v2$Virus, sep=":")
+# remove mocks
+coldata_v2 <- coldata_v2[coldata_v2$Virus != "Mock", ]
+coldata_v2$strain_virus <- gsub("WT", "PR8", coldata_v2$strain_virus)
+coldata_v2$strain_virus <- gsub("DI", "DI222", coldata_v2$strain_virus)
+coldata_v2$strain_virus <- factor(coldata_v2$strain_virus, 
+                                  levels=c("IFNAR:PR8", "IFNAR:DI222", 
+                                           "IFNLR:PR8", "IFNLR:DI222",
+                                           "IFNL/AR:PR8", "IFNL/AR:DI222"))
+coldata_v2$Sex <- gsub("M", "Male", coldata_v2$Sex)
+coldata_v2$Sex <- gsub("F", "Female", coldata_v2$Sex)
+coldata_v2$Sex <- factor(coldata_v2$Sex, levels=c("Male", "Female"))
+ggplot(coldata_v2, aes(x=strain_virus, y=viral_percentage_sum)) +
+  geom_boxplot(outlier.size=0, fill="transparent") +
+  geom_point(size=6, aes(color=Sex)) +
+  scale_color_manual(values=c("#788aa3", "#f4acb7")) +
+  theme(text=element_text(size=15),
+        panel.background=element_rect(fill="white", color="grey50"),
+        panel.grid.major=element_line(color="grey90"),
+        strip.background=element_blank(),
+        strip.text=element_blank()) +
+  labs(x="Mouse strain : virus", y="Viral read percentage (%)", color="Sex") +
+  scale_y_continuous(breaks=seq(0, 1, 0.2), limits=c(0, 1))
+ggplot(coldata_v2, aes(x=strain_virus, y=viral_percentage_sum)) +
+  geom_boxplot(outlier.size=0, fill="transparent") +
+  geom_point(size=6, color="#788aa3") +
+  theme(text=element_text(size=15),
+        panel.background=element_rect(fill="white", color="grey50"),
+        panel.grid.major=element_line(color="grey90"),
+        strip.background=element_blank(),
+        strip.text=element_blank()) +
+  labs(x="Mouse strain : virus", y="Viral read percentage (%)", color="Sex") +
+  scale_y_continuous(breaks=seq(0, 1, 0.2), limits=c(0, 1))
+
+# test statistical significance between groups
+# Pairwise Wilcoxon rank sum test with corrections for multiple testing
+pairwise.wilcox.test(coldata_v2$viral_percentage_sum, g=coldata_v2$strain_virus, p.adjust.method="BH")
+
+# clean up the environment
+rm(AR_PR8, AR_DI222, LR_PR8, LR_DI222, ALR_PR8, ALR_DI222, viral_data_sum, viral_data, data_prob, data_libsize, coldata_v2)
+
+```
+
+
+
+#### DESeq2 - Initial visualization within mouse strain ####
+```{r warning=FALSE, message=FALSE}
+## Prepare DESeq2 dataset ##
+# Prepare input data
+AR_mice_coldata <- coldata[coldata$Strain == "IFNAR", ]
+LR_mice_coldata <- coldata[coldata$Strain == "IFNLR", ]
+ALR_mice_coldata <- coldata[coldata$Strain == "IFNL/AR", ]
+
+AR_mice_coldata$Virus <- factor(AR_mice_coldata$Virus, levels=c("Mock", "WT", "DI"))
+LR_mice_coldata$Virus <- factor(LR_mice_coldata$Virus, levels=c("Mock", "WT", "DI"))
+ALR_mice_coldata$Virus <- factor(ALR_mice_coldata$Virus, levels=c("Mock", "WT", "DI"))
+
+all(rownames(AR_mice_coldata) == colnames(AR_mice_data)) # TRUE
+all(rownames(LR_mice_coldata) == colnames(LR_mice_data)) # TRUE
+all(rownames(ALR_mice_coldata) == colnames(ALR_mice_data)) # TRUE
+
+# construct a DESeqData
+AR_dds <- DESeqDataSetFromMatrix(countData=AR_mice_data, 
+                                 colData=AR_mice_coldata, 
+                                 design= ~ Virus)
+LR_dds <- DESeqDataSetFromMatrix(countData=LR_mice_data, 
+                                 colData=LR_mice_coldata, 
+                                 design= ~ Virus)
+ALR_dds <- DESeqDataSetFromMatrix(countData=ALR_mice_data, 
+                                  colData=ALR_mice_coldata, 
+                                  design= ~ Virus)
+
+
+## Pre-filtering ##
+# Calculate cpm and check # of reads corresponding to # cpm
+mean(colSums(AR_mice_data)) 
+mean(colSums(LR_mice_data)) 
+mean(colSums(ALR_mice_data)) 
+AR_mice_data_cpm <- cpm(AR_mice_data)
+LR_mice_data_cpm <- cpm(LR_mice_data)
+ALR_mice_data_cpm <- cpm(ALR_mice_data)
+
+# edgeR recommended using cpm for filtering
+# We will use cpm=1 as threshold and at least in two samples
+AR_mice_data_keep <- rowSums(AR_mice_data_cpm >= 1) >= 2
+LR_mice_data_keep <- rowSums(LR_mice_data_cpm >= 1) >= 2
+ALR_mice_data_keep <- rowSums(ALR_mice_data_cpm >= 1) >= 2
+
+AR_dds <- AR_dds[AR_mice_data_keep, ]
+LR_dds <- LR_dds[LR_mice_data_keep, ]
+ALR_dds <- ALR_dds[ALR_mice_data_keep, ]
+
+nrow(AR_dds) 
+nrow(LR_dds) 
+nrow(ALR_dds)
+
+
+## Check factor levels ##
+levels(AR_dds$Virus)
+levels(LR_dds$Virus)
+levels(ALR_dds$Virus)
+
+
+## Variance stabilizing transformations for downstream visualization and clustering ##
+AR_vst <- varianceStabilizingTransformation(AR_dds, blind=FALSE)
+head(assay(AR_vst), 3)
+LR_vst <- varianceStabilizingTransformation(LR_dds, blind=FALSE)
+head(assay(LR_vst), 3)
+ALR_vst <- varianceStabilizingTransformation(ALR_dds, blind=FALSE)
+head(assay(ALR_vst), 3)
+
+
+## Estimate size factor ##
+AR_dds <- estimateSizeFactors(AR_dds)
+LR_dds <- estimateSizeFactors(LR_dds)
+ALR_dds <- estimateSizeFactors(ALR_dds)
+
+
+## Sample-to-sample Euclidean distance ##
+AR_sampleDists <- dist(t(assay(AR_vst)))
+AR_sampleDists
+LR_sampleDists <- dist(t(assay(LR_vst)))
+LR_sampleDists
+ALR_sampleDists <- dist(t(assay(ALR_vst)))
+ALR_sampleDists
+
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+AR_sampleDistMatrix <- as.matrix(AR_sampleDists)
+colnames(AR_sampleDistMatrix) <- NULL
+pheatmap(AR_sampleDistMatrix,
+         clustering_distance_rows=AR_sampleDists,
+         clustering_distance_cols=AR_sampleDists,
+         col=colors,
+         fontsize=12)
+LR_sampleDistMatrix <- as.matrix(LR_sampleDists)
+colnames(LR_sampleDistMatrix) <- NULL
+pheatmap(LR_sampleDistMatrix,
+         clustering_distance_rows=LR_sampleDists,
+         clustering_distance_cols=LR_sampleDists,
+         col=colors,
+         fontsize=12)
+ALR_sampleDistMatrix <- as.matrix(ALR_sampleDists)
+colnames(ALR_sampleDistMatrix) <- NULL
+pheatmap(ALR_sampleDistMatrix,
+         clustering_distance_rows=ALR_sampleDists,
+         clustering_distance_cols=ALR_sampleDists,
+         col=colors,
+         fontsize=12)
+
+# Sample-to-sample Poisson distance 
+AR_poisd <- PoissonDistance(t(counts(AR_dds)))
+LR_poisd <- PoissonDistance(t(counts(LR_dds)))
+ALR_poisd <- PoissonDistance(t(counts(ALR_dds)))
+
+AR_samplePoisDistMatrix <- as.matrix(AR_poisd$dd)
+rownames(AR_samplePoisDistMatrix) <- colnames(AR_mice_data)
+colnames(AR_samplePoisDistMatrix) <- NULL
+pheatmap(AR_samplePoisDistMatrix,
+         clustering_distance_rows=AR_poisd$dd,
+         clustering_distance_cols=AR_poisd$dd,
+         col=colors,
+         fontsize=12)
+LR_samplePoisDistMatrix <- as.matrix(LR_poisd$dd)
+rownames(LR_samplePoisDistMatrix) <- colnames(LR_mice_data)
+colnames(LR_samplePoisDistMatrix) <- NULL
+pheatmap(LR_samplePoisDistMatrix,
+         clustering_distance_rows=LR_poisd$dd,
+         clustering_distance_cols=LR_poisd$dd,
+         col=colors,
+         fontsize=12)
+ALR_samplePoisDistMatrix <- as.matrix(ALR_poisd$dd)
+rownames(ALR_samplePoisDistMatrix) <- colnames(ALR_mice_data)
+colnames(ALR_samplePoisDistMatrix) <- NULL
+pheatmap(ALR_samplePoisDistMatrix,
+         clustering_distance_rows=ALR_poisd$dd,
+         clustering_distance_cols=ALR_poisd$dd,
+         col=colors,
+         fontsize=12)
+
+
+## PCA plot ##
+AR_pcaData <- plotPCA(AR_vst, intgroup=c("Virus", "Sex"), returnData=TRUE)
+AR_percentVar <- round(100 * attr(AR_pcaData, "percentVar"))
+AR_pcaData$Sex <- gsub("M", "Male", AR_pcaData$Sex)
+AR_pcaData$Sex <- gsub("F", "Female", AR_pcaData$Sex)
+AR_pcaData$Sex <- factor(AR_pcaData$Sex, levels=c("Male", "Female"))
+AR_pcaData$Virus <- gsub("WT", "PR8", AR_pcaData$Virus)
+AR_pcaData$Virus <- gsub("DI", "DI222", AR_pcaData$Virus)
+AR_pcaData$Virus <- factor(AR_pcaData$Virus, levels=c("PR8", "DI222", "Mock"))
+ggplot(AR_pcaData, aes(PC1, PC2, color=Virus, shape=Sex)) +
+  geom_point(size=5) +
+  xlab(paste0("PC1: ", AR_percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ", AR_percentVar[2],"% variance")) +
+  labs(color="Condition", shape="Sex") +
+  scale_color_manual(values=c("#27AAE1", "#FE8500", "#d68adf")) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+LR_pcaData <- plotPCA(LR_vst, intgroup=c("Virus", "Sex"), returnData=TRUE)
+LR_percentVar <- round(100 * attr(LR_pcaData, "percentVar"))
+LR_pcaData$Sex <- gsub("M", "Male", LR_pcaData$Sex)
+LR_pcaData$Sex <- gsub("F", "Female", LR_pcaData$Sex)
+LR_pcaData$Sex <- factor(LR_pcaData$Sex, levels=c("Male", "Female"))
+LR_pcaData$Virus <- gsub("WT", "PR8", LR_pcaData$Virus)
+LR_pcaData$Virus <- gsub("DI", "DI222", LR_pcaData$Virus)
+LR_pcaData$Virus <- factor(LR_pcaData$Virus, levels=c("PR8", "DI222", "Mock"))
+ggplot(LR_pcaData, aes(PC1, PC2, color=Virus, shape=Sex)) +
+  geom_point(size=5) +
+  xlab(paste0("PC1: ", LR_percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ", LR_percentVar[2],"% variance")) +
+  labs(color="Condition", shape="Sex") +
+  scale_color_manual(values=c("#27AAE1", "#FE8500", "#d68adf")) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+ALR_pcaData <- plotPCA(ALR_vst, intgroup=c("Virus", "Sex"), returnData=TRUE)
+ALR_percentVar <- round(100 * attr(ALR_pcaData, "percentVar"))
+ALR_pcaData$Sex <- gsub("M", "Male", ALR_pcaData$Sex)
+ALR_pcaData$Sex <- gsub("F", "Female", ALR_pcaData$Sex)
+ALR_pcaData$Sex <- factor(ALR_pcaData$Sex, levels=c("Male", "Female"))
+ALR_pcaData$Virus <- gsub("WT", "PR8", ALR_pcaData$Virus)
+ALR_pcaData$Virus <- gsub("DI", "DI222", ALR_pcaData$Virus)
+ALR_pcaData$Virus <- factor(ALR_pcaData$Virus, levels=c("PR8", "DI222", "Mock"))
+ggplot(ALR_pcaData, aes(PC1, PC2, color=Virus, shape=Sex)) +
+  geom_point(size=5) +
+  xlab(paste0("PC1: ", ALR_percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ", ALR_percentVar[2],"% variance")) +
+  labs(color="Condition", shape="Sex") +
+  scale_color_manual(values=c("#27AAE1", "#FE8500", "#d68adf")) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+
+## MDS plot ##
+AR_mds <- as.data.frame(colData(AR_vst))  %>% cbind(cmdscale(AR_sampleDistMatrix))
+AR_mds$Sex <- gsub("M", "Male", AR_mds$Sex)
+AR_mds$Sex <- gsub("F", "Female", AR_mds$Sex)
+AR_mds$Virus <- gsub("WT", "PR8", AR_mds$Virus)
+AR_mds$Virus <- gsub("DI", "DI222", AR_mds$Virus)
+AR_mds$Virus <- factor(AR_mds$Virus, levels=c("PR8", "DI222", "Mock"))
+AR_mds$Sex <- factor(AR_mds$Sex, levels=c("Male", "Female"))
+ggplot(AR_mds, aes(x=`1`, y=`2`, color=Virus, shape=Sex)) +
+  geom_point(size=5) +
+  labs(color="Condition", x="MDS_1", y="MDS_2", shape="Sex") +
+  scale_color_manual(values=c("#27AAE1", "#FE8500", "#d68adf")) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+LR_mds <- as.data.frame(colData(LR_vst))  %>% cbind(cmdscale(LR_sampleDistMatrix))
+LR_mds$Sex <- gsub("M", "Male", LR_mds$Sex)
+LR_mds$Sex <- gsub("F", "Female", LR_mds$Sex)
+LR_mds$Virus <- gsub("WT", "PR8", LR_mds$Virus)
+LR_mds$Virus <- gsub("DI", "DI222", LR_mds$Virus)
+LR_mds$Virus <- factor(LR_mds$Virus, levels=c("PR8", "DI222", "Mock"))
+LR_mds$Sex <- factor(LR_mds$Sex, levels=c("Male", "Female"))
+ggplot(LR_mds, aes(x=`1`, y=`2`, color=Virus, shape=Sex)) +
+  geom_point(size=5) +
+  labs(color="Condition", x="MDS_1", y="MDS_2", shape="Sex") +
+  scale_color_manual(values=c("#27AAE1", "#FE8500", "#d68adf")) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+ALR_mds <- as.data.frame(colData(ALR_vst))  %>% cbind(cmdscale(ALR_sampleDistMatrix))
+ALR_mds$Sex <- gsub("M", "Male", ALR_mds$Sex)
+ALR_mds$Sex <- gsub("F", "Female", ALR_mds$Sex)
+ALR_mds$Virus <- gsub("WT", "PR8", ALR_mds$Virus)
+ALR_mds$Virus <- gsub("DI", "DI222", ALR_mds$Virus)
+ALR_mds$Virus <- factor(ALR_mds$Virus, levels=c("PR8", "DI222", "Mock"))
+ALR_mds$Sex <- factor(ALR_mds$Sex, levels=c("Male", "Female"))
+ggplot(ALR_mds, aes(x=`1`, y=`2`, color=Virus, shape=Sex)) +
+  geom_point(size=5) +
+  labs(color="Condition", x="MDS_1", y="MDS_2", shape="Sex") +
+  scale_color_manual(values=c("#27AAE1", "#FE8500", "#d68adf")) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+# clean up the environment
+rm(ALR_pcaData, ALR_poisd, ALR_sampleDistMatrix, ALR_samplePoisDistMatrix,
+   AR_pcaData, AR_poisd, AR_sampleDistMatrix, AR_samplePoisDistMatrix,
+   LR_pcaData, LR_poisd, LR_sampleDistMatrix, LR_samplePoisDistMatrix, 
+   ALR_mice_data_keep, ALR_percentVar, ALR_sampleDists,
+   AR_mice_data_keep, AR_percentVar, AR_sampleDists,
+   colors, LR_mice_data_keep, LR_percentVar, LR_sampleDists)
+
+```
+
+
+
+#### edgeR - Differential expression analysis ####
+```{r warning=FALSE, message=FALSE}
+## Create a DEGList object ##
+AR_dgList <- DGEList(counts=counts(AR_dds))
+LR_dgList <- DGEList(counts=counts(LR_dds))
+ALR_dgList <- DGEList(counts=counts(ALR_dds))
+
+
+## Filtering ##
+# Skip this step because we got matrix from filtered DESeq2 count matrix
+
+
+## Normalization - TMM (trimmed mean of M-values (TMM)) ##
+AR_dgList <- calcNormFactors(AR_dgList, method="TMM")
+LR_dgList <- calcNormFactors(LR_dgList, method="TMM")
+ALR_dgList <- calcNormFactors(ALR_dgList, method="TMM")
+
+
+## Data exploration ##
+plotMDS(AR_dgList)
+plotMDS(LR_dgList)
+plotMDS(ALR_dgList)
+
+
+## Setting up the Model ##
+AR_model <- AR_mice_coldata$Virus
+LR_model <- LR_mice_coldata$Virus
+ALR_model <- ALR_mice_coldata$Virus
+
+# Add "0+" will change the first contrast from "intercept" to the baseline
+# Here, the 0+ in the model formula is an instruction not to include an intercept column and
+# instead to include a column for each group
+AR_designMat <- model.matrix(~ 0 + AR_model)
+LR_designMat <- model.matrix(~ 0 + LR_model)
+ALR_designMat <- model.matrix(~ 0 + ALR_model)
+
+
+## Estimating Dispersions ##
+AR_dgList <- estimateDisp(AR_dgList, design=AR_designMat)
+LR_dgList <- estimateDisp(LR_dgList, design=LR_designMat)
+ALR_dgList <- estimateDisp(ALR_dgList, design=ALR_designMat)
+
+
+## Differential Expression ##
+AR_fit <- glmQLFit(AR_dgList, AR_designMat)
+LR_fit <- glmQLFit(LR_dgList, LR_designMat)
+ALR_fit <- glmQLFit(ALR_dgList, ALR_designMat)
+
+AR_PR8_qlf <- glmQLFTest(AR_fit, contrast=c(-1,1,0))
+AR_DI222_qlf <- glmQLFTest(AR_fit, contrast=c(-1,0,1))
+LR_PR8_qlf <- glmQLFTest(LR_fit, contrast=c(-1,1,0))
+LR_DI222_qlf <- glmQLFTest(LR_fit, contrast=c(-1,0,1))
+ALR_PR8_qlf <- glmQLFTest(ALR_fit, contrast=c(-1,1,0))
+ALR_DI222_qlf <- glmQLFTest(ALR_fit, contrast=c(-1,0,1))
+
+# Print all the DEGs. Change "n=" to a smaller value will only print required top n genes.
+AR_PR8_edgeR <- topTags(AR_PR8_qlf, sort.by="logFC", p.value=0.05, n=nrow(AR_PR8_qlf))[["table"]] 
+dim(AR_PR8_edgeR) # 6281 genes
+AR_PR8_edgeR$Geneid <- rownames(AR_PR8_edgeR)
+AR_PR8_edgeR <- merge(mouse_geneid_name_list, AR_PR8_edgeR, by="Geneid", all.y=TRUE)
+AR_PR8_edgeR <- AR_PR8_edgeR[order(AR_PR8_edgeR$logFC, decreasing=TRUE), ]
+
+AR_DI222_edgeR <- topTags(AR_DI222_qlf, sort.by="logFC", p.value=0.05, n=nrow(AR_DI222_qlf))[["table"]] 
+dim(AR_DI222_edgeR) # 5233 genes
+AR_DI222_edgeR$Geneid <- rownames(AR_DI222_edgeR)
+AR_DI222_edgeR <- merge(mouse_geneid_name_list, AR_DI222_edgeR, by="Geneid", all.y=TRUE)
+AR_DI222_edgeR <- AR_DI222_edgeR[order(AR_DI222_edgeR$logFC, decreasing=TRUE), ]
+
+LR_PR8_edgeR <- topTags(LR_PR8_qlf, sort.by="logFC", p.value=0.05, n=nrow(LR_PR8_qlf))[["table"]] 
+dim(LR_PR8_edgeR) # 2308 genes
+LR_PR8_edgeR$Geneid <- rownames(LR_PR8_edgeR)
+LR_PR8_edgeR <- merge(mouse_geneid_name_list, LR_PR8_edgeR, by="Geneid", all.y=TRUE)
+LR_PR8_edgeR <- LR_PR8_edgeR[order(LR_PR8_edgeR$logFC, decreasing=TRUE), ]
+
+LR_DI222_edgeR <- topTags(LR_DI222_qlf, sort.by="logFC", p.value=0.05, n=nrow(LR_DI222_qlf))[["table"]] 
+dim(LR_DI222_edgeR) # 471 genes
+LR_DI222_edgeR$Geneid <- rownames(LR_DI222_edgeR)
+LR_DI222_edgeR <- merge(mouse_geneid_name_list, LR_DI222_edgeR, by="Geneid", all.y=TRUE)
+LR_DI222_edgeR <- LR_DI222_edgeR[order(LR_DI222_edgeR$logFC, decreasing=TRUE), ]
+
+ALR_PR8_edgeR <- topTags(ALR_PR8_qlf, sort.by="logFC", p.value=0.05, n=nrow(ALR_PR8_qlf))[["table"]] 
+dim(ALR_PR8_edgeR) # 2 genes
+ALR_PR8_edgeR$Geneid <- rownames(ALR_PR8_edgeR)
+ALR_PR8_edgeR <- merge(mouse_geneid_name_list, ALR_PR8_edgeR, by="Geneid", all.y=TRUE)
+ALR_PR8_edgeR <- ALR_PR8_edgeR[order(ALR_PR8_edgeR$logFC, decreasing=TRUE), ]
+
+ALR_DI222_edgeR <- topTags(ALR_DI222_qlf, sort.by="logFC", p.value=0.05, n=nrow(ALR_DI222_qlf))[["table"]] 
+dim(ALR_DI222_edgeR) # 0 genes
+#ALR_DI222_edgeR$Geneid <- rownames(ALR_DI222_edgeR)
+#ALR_DI222_edgeR <- merge(mouse_geneid_name_list, ALR_DI222_edgeR, by="Geneid", all.y=TRUE)
+#ALR_DI222_edgeR <- ALR_DI222_edgeR[order(ALR_DI222_edgeR$logFC, decreasing=TRUE), ]
+
+## Export DEG lists ##
+write.csv(AR_PR8_edgeR, file="DEGList/edgeR/AR_PR8_edgeR.csv")
+write.csv(AR_DI222_edgeR, file="DEGList/edgeR/AR_DI222_edgeR.csv")
+write.csv(LR_PR8_edgeR, file="DEGList/edgeR/LR_PR8_edgeR.csv")
+write.csv(LR_DI222_edgeR, file="DEGList/edgeR/LR_DI222_edgeR.csv")
+write.csv(ALR_PR8_edgeR, file="DEGList/edgeR/ALR_PR8_edgeR.csv")
+#write.csv(ALR_DI222_edgeR, file="DEGList/edgeR/ALR_DI222_edgeR.csv")
+
+# clean up the environment
+rm(ALR_designMat, ALR_DI222_qlf, ALR_fit, ALR_PR8_qlf, 
+   AR_designMat, AR_DI222_qlf, AR_fit, AR_PR8_qlf,
+   LR_designMat, LR_DI222_qlf, LR_fit, LR_PR8_qlf,
+   ALR_DI222_edgeR, ALR_model, AR_model, LR_model)
+
+```
+
+
+
+#### Compare DEGs in each group ####
+```{r warning=FALSE, message=FALSE}
+# obtain the number of DEGs that are up- or down- regulated in each category
+sum(AR_PR8_edgeR$edgeR_logFC > 0) 
+sum(AR_DI222_edgeR$edgeR_logFC > 0) 
+sum(LR_PR8_edgeR$edgeR_logFC > 0) 
+sum(LR_DI222_edgeR$edgeR_logFC > 0) 
+sum(ALR_PR8_edgeR$edgeR_logFC > 0) 
+
+sum(AR_PR8_edgeR$edgeR_logFC < 0) 
+sum(AR_DI222_edgeR$edgeR_logFC < 0) 
+sum(LR_PR8_edgeR$edgeR_logFC < 0) 
+sum(LR_DI222_edgeR$edgeR_logFC < 0)
+sum(ALR_PR8_edgeR$edgeR_logFC < 0) 
+
+# get the overlapping of DEGs under WT and DI infection
+AR_edgeR_intersect <- intersect(AR_PR8_edgeR$Geneid, AR_DI222_edgeR$Geneid) 
+AR_edgeR_intersect_name <- mouse_geneid_name_list[mouse_geneid_name_list$Geneid %in% AR_edgeR_intersect, "Genename"]
+
+LR_edgeR_intersect <- intersect(LR_PR8_edgeR$Geneid, LR_DI222_edgeR$Geneid)
+LR_edgeR_intersect_name <- mouse_geneid_name_list[mouse_geneid_name_list$Geneid %in% LR_edgeR_intersect, "Genename"]
+
+# Overall intersect
+edgeR_intersect <- intersect(AR_edgeR_intersect, LR_edgeR_intersect) 
+edgeR_intersect_name <- mouse_geneid_name_list[mouse_geneid_name_list$Geneid %in% edgeR_intersect, "Genename"]
+
+# get setdiff 
+AR_edgeR_PR8unique <- setdiff(AR_PR8_edgeR$Geneid, AR_DI222_edgeR$Geneid)
+LR_edgeR_PR8unique <- setdiff(LR_PR8_edgeR$Geneid, LR_DI222_edgeR$Geneid)
+ALR_edgeR_PR8unique <- ALR_PR8_edgeR$Geneid 
+edgeR_PR8unique <- intersect(intersect(AR_edgeR_PR8unique, LR_edgeR_PR8unique), ALR_edgeR_PR8unique) 
+edgeR_PR8unique <- intersect(AR_edgeR_PR8unique, LR_edgeR_PR8unique) 
+edgeR_PR8unique_name <- mouse_geneid_name_list[mouse_geneid_name_list$Geneid %in% edgeR_PR8unique, "Genename"]
+
+AR_edgeR_DI222unique <- setdiff(AR_DI222_edgeR$Geneid, AR_PR8_edgeR$Geneid)
+LR_edgeR_DI222unique <- setdiff(LR_DI222_edgeR$Geneid, LR_PR8_edgeR$Geneid)
+edgeR_DI222unique <- intersect(AR_edgeR_DI222unique, LR_edgeR_DI222unique) 
+edgeR_DI222unique_name <- mouse_geneid_name_list[mouse_geneid_name_list$Geneid %in% edgeR_DI222unique, "Genename"]
+
+# Draw overlapping and setdiff of 4 conditions in a venn diagram (PR8 and DI222) ##
+library(VennDiagram)
+n12 <- intersect(AR_PR8_edgeR$Geneid, AR_DI222_edgeR$Geneid)
+n13 <- intersect(AR_PR8_edgeR$Geneid, LR_PR8_edgeR$Geneid)
+n14 <- intersect(AR_PR8_edgeR$Geneid, LR_DI222_edgeR$Geneid)
+n23 <- intersect(AR_DI222_edgeR$Geneid, LR_PR8_edgeR$Geneid)
+n24 <- intersect(AR_DI222_edgeR$Geneid, LR_DI222_edgeR$Geneid)
+n34 <- intersect(LR_PR8_edgeR$Geneid, LR_DI222_edgeR$Geneid)
+n123 <- intersect(n12, LR_PR8_edgeR$Geneid)
+n124 <- intersect(n12, LR_DI222_edgeR$Geneid)
+n134 <- intersect(n13, LR_DI222_edgeR$Geneid)
+n234 <- intersect(n23, LR_DI222_edgeR$Geneid)
+n1234 <- intersect(n12, n34)
+
+draw.quad.venn(length(AR_PR8_edgeR$Geneid), # 1
+               length(AR_DI222_edgeR$Geneid), # 2
+               length(LR_PR8_edgeR$Geneid), # 3
+               length(LR_DI222_edgeR$Geneid), # 4
+               length(n12), # 12
+               length(n13), # 13
+               length(n14), # 14
+               length(n23), # 23
+               length(n24), # 24
+               length(n34), # 34
+               length(n123), # 123
+               length(n124), # 124
+               length(n134), # 134
+               length(n234), # 234
+               length(n1234), # 1234
+               category=c("IFNAR-/- PR8 infection", "IFNAR-/- DI222+PR8 co-infection",
+                          "IFNLR-/- PR8 infection", "IFNLR-/- DI222+PR8 co-infection"), 
+               cat.pos=c(0, 0, 20, 20), cat.dist = c(0.22, 0.22, 0.11, 0.11),
+               lty=rep("blank", 4), fill=c("#005082", "#fe8761", "#00a8cc", "#fed39f"), alpha=rep(0.5, 4)
+)
+
+# extract df in PR8-only or DI222-only categories
+length(edgeR_PR8unique_name) 
+length(edgeR_DI222unique_name)
+
+edgeR_PR8unique_df_AR <- AR_PR8_edgeR[AR_PR8_edgeR$Geneid %in% edgeR_PR8unique, ]
+edgeR_PR8unique_df_LR <- LR_PR8_edgeR[LR_PR8_edgeR$Geneid %in% edgeR_PR8unique, ]
+edgeR_PR8unique_df <- merge(edgeR_PR8unique_df_AR[, 1:3], edgeR_PR8unique_df_LR[, 1:3], by=c("Geneid", "Genename"))
+colnames(edgeR_PR8unique_df)[3:4] <- c("AR_logFC", "LR_logFC")
+edgeR_PR8unique_df$sign_consis <- "Yes"
+for (i in 1:nrow(edgeR_PR8unique_df)) {
+  if (edgeR_PR8unique_df[i, 3] > 0 & edgeR_PR8unique_df[i, 4] < 0) {
+    edgeR_PR8unique_df[i, "sign_consis"] <- "No"
+  } else if (edgeR_PR8unique_df[i, 3] < 0 & edgeR_PR8unique_df[i, 4] > 0) {
+    edgeR_PR8unique_df[i, "sign_consis"] <- "No"
+  }
+}
+sum(edgeR_PR8unique_df$sign_consis == "Yes") 
+sum(edgeR_PR8unique_df$sign_consis == "No")
+write.csv(edgeR_PR8unique_df, file="DEGlist/edgeR/edgeR_PR8unique_df.csv")
+
+edgeR_DI222unique_df_AR <- AR_DI222_edgeR[AR_DI222_edgeR$Geneid %in% edgeR_DI222unique, ]
+edgeR_DI222unique_df_LR <- LR_DI222_edgeR[LR_DI222_edgeR$Geneid %in% edgeR_DI222unique, ]
+edgeR_DI222unique_df <- merge(edgeR_DI222unique_df_AR[, 1:3], edgeR_DI222unique_df_LR[, 1:3], by=c("Geneid", "Genename"))
+colnames(edgeR_DI222unique_df)[3:4] <- c("AR_logFC", "LR_logFC")
+edgeR_DI222unique_df$sign_consis <- "Yes"
+for (i in 1:nrow(edgeR_DI222unique_df)) {
+  if (edgeR_DI222unique_df[i, 3] > 0 & edgeR_DI222unique_df[i, 4] < 0) {
+    edgeR_DI222unique_df[i, "sign_consis"] <- "No"
+  } else if (edgeR_DI222unique_df[i, 3] < 0 & edgeR_DI222unique_df[i, 4] > 0) {
+    edgeR_DI222unique_df[i, "sign_consis"] <- "No"
+  }
+}
+sum(edgeR_DI222unique_df$sign_consis == "Yes")
+sum(edgeR_DI222unique_df$sign_consis == "No")
+write.csv(edgeR_DI222unique_df, file="DEGlist/edgeR/edgeR_DI222unique_df.csv")
+
+edgeR_intersect_ARPR8 <- AR_PR8_edgeR[AR_PR8_edgeR$Geneid %in% edgeR_intersect, ]
+edgeR_intersect_ARDI222 <- AR_DI222_edgeR[AR_DI222_edgeR$Geneid %in% edgeR_intersect, ]
+edgeR_intersect_LRPR8 <- LR_PR8_edgeR[LR_PR8_edgeR$Geneid %in% edgeR_intersect, ]
+edgeR_intersect_LRDI222 <- LR_DI222_edgeR[LR_DI222_edgeR$Geneid %in% edgeR_intersect, ]
+edgeR_intersect_df <- merge(edgeR_intersect_ARPR8[, 1:3], 
+                            edgeR_intersect_ARDI222[, 1:3], by=c("Geneid", "Genename"))
+colnames(edgeR_intersect_df)[3:4] <- c("AR_PR8_logFC", "AR_DI222_logFC")
+edgeR_intersect_df <- merge(edgeR_intersect_df, 
+                            edgeR_intersect_LRPR8[, 1:3], by=c("Geneid", "Genename"))
+colnames(edgeR_intersect_df)[5] <- "LR_PR8_logFC"
+edgeR_intersect_df <- merge(edgeR_intersect_df, 
+                            edgeR_intersect_LRDI222[, 1:3], by=c("Geneid", "Genename"))
+colnames(edgeR_intersect_df)[6] <- "LR_DI222_logFC"
+edgeR_intersect_df$sign_consis <- "Yes"
+for (i in 1:nrow(edgeR_intersect_df)) {
+  if (sum(edgeR_intersect_df[i, 3:6] > 0) < 4 & 
+      sum(edgeR_intersect_df[i, 3:6] > 0) > 0) {
+    edgeR_intersect_df[i, "sign_consis"] <- "No"
+  }
+}
+sum(edgeR_intersect_df$sign_consis == "Yes")
+sum(edgeR_intersect_df$sign_consis == "No")
+write.csv(edgeR_intersect_df, file="DEGlist/edgeR/edgeR_intersect_df.csv")
+
+
+## Extract logFC for all the DEGs ##
+edgeR_DEG <- merge(AR_PR8_edgeR[, 1:3], AR_DI222_edgeR[, 1:3], by=c("Geneid", "Genename"), all=TRUE)
+colnames(edgeR_DEG)[3:4] <- c("AR_PR8", "AR_DI222")
+edgeR_DEG <- merge(edgeR_DEG, LR_PR8_edgeR[, 1:3], by=c("Geneid", "Genename"), all=TRUE)
+colnames(edgeR_DEG)[5] <- "LR_PR8"
+edgeR_DEG <- merge(edgeR_DEG, LR_DI222_edgeR[, 1:3], by=c("Geneid", "Genename"), all=TRUE)
+colnames(edgeR_DEG)[6] <- "LR_DI222"
+edgeR_DEG <- merge(edgeR_DEG, ALR_PR8_edgeR[, 1:3], by=c("Geneid", "Genename"), all=TRUE)
+colnames(edgeR_DEG)[7] <- "ALR_PR8"
+
+# export the DEG matrix
+write.csv(edgeR_DEG, file="DEGlist/edgeR/edgeR_DEG_logFCsummary.csv")
+
+```
+
+
+
+#### Plot the GO terms associated with DEGs ####
+```{r warning=FALSE, message=FALSE}
+edgeR_GO_unique_intersect <- read.csv("DEGlist/edgeR/DAVID_GO/edgeR_unique-or-intersect_DAVID-GO-BP_summary.csv", stringsAsFactors=FALSE)
+edgeR_GO_condition <- read.csv("DEGlist/edgeR/DAVID_GO/edgeR_each-virus_DAVID-GO-BP_summary.csv", stringsAsFactors=FALSE)
+
+### Get top5 GO upreg in each category - unique or intersect gene set GO ###
+edgeR_GO_ui_top5_intersect <- edgeR_GO_unique_intersect[edgeR_GO_unique_intersect$Category == "intersect_up", "Term"][1:5]
+edgeR_GO_ui_top5_PR8 <- edgeR_GO_unique_intersect[edgeR_GO_unique_intersect$Category == "PR8unique_up", "Term"][1:5]
+edgeR_GO_ui_top5_DI222 <- edgeR_GO_unique_intersect[edgeR_GO_unique_intersect$Category == "DI222unique_up", "Term"][1:5]
+
+edgeR_GO_ui_top5_union <- union(edgeR_GO_ui_top5_intersect, edgeR_GO_ui_top5_PR8)
+edgeR_GO_ui_top5_union <- union(edgeR_GO_ui_top5_union, edgeR_GO_ui_top5_DI222)
+
+edgeR_GO_ui_top5 <- edgeR_GO_unique_intersect[edgeR_GO_unique_intersect$Term %in% edgeR_GO_ui_top5_union, ]
+edgeR_GO_ui_top5$Term <- factor(edgeR_GO_ui_top5$Term, levels=rev(unique(edgeR_GO_ui_top5$Term)))
+edgeR_GO_ui_top5$Category <- factor(edgeR_GO_ui_top5$Category, 
+                                    levels=c("intersect_up", "PR8unique_up", "DI222unique_up"))
+edgeR_GO_ui_top5$log10Benjamini <- -log10(edgeR_GO_ui_top5$Benjamini)
+ggplot(edgeR_GO_ui_top5, aes(x=Category, y=Term, size=X., color=log10Benjamini)) +
+  geom_point() +
+  theme(text=element_text(size=15),
+        panel.background=element_rect(fill="white", color="grey50"),
+        panel.grid.major=element_line(color="grey90"),
+        strip.background=element_blank(),
+        strip.text=element_blank(),
+        axis.text.x=element_text(angle=45, hjust=1)) +
+  labs(x="Condition", y="GO biological process", color="-log10(Benjamini)", size="Gene ratio") +
+  scale_size(range=c(1, 10), breaks=c(5, 10, 20, 60)) +
+  scale_color_gradient2(low="#97d1f4", mid="#74bbe8", high="#0c3e5e")
+
+
+## Plot the logFC heatmap for genes in unique/common lists associated with certain GO terms ##
+# Innate immune response genes FC #
+# Shared sets #
+innate_immune_common_geneID <- edgeR_GO_ui_top5[edgeR_GO_ui_top5$Term == "innate immune response", "Genes"][1]
+innate_immune_common_geneID <- strsplit(innate_immune_common_geneID, split=", ")[[1]]
+innate_immune_common_geneID <- unique(innate_immune_common_geneID)
+innate_immune_common_geneName <- mouse_geneid_name_list[mouse_geneid_name_list$Geneid %in% innate_immune_common_geneID, "Genename"]
+
+edgeR_innate_common_FC <- edgeR_DEG[edgeR_DEG$Geneid %in% innate_immune_common_geneID, ]
+rownames(edgeR_innate_common_FC) <- edgeR_innate_common_FC$Genename
+edgeR_innate_common_FC$Geneid <- NULL
+edgeR_innate_common_FC$Genename <- NULL
+edgeR_innate_common_FC[is.na(edgeR_innate_common_FC)] <- 0
+# remove ALR_PR8 column
+edgeR_innate_common_FC$ALR_PR8 <- NULL
+
+hmcol <- colorRampPalette(brewer.pal(9, "Reds"))(100)
+heatmap.2(as.matrix(edgeR_innate_common_FC), Colv=FALSE, Rowv=TRUE, dendrogram="none",
+          trace="none", margins=c(10,10), density.info="none", col=hmcol,
+          cexCol=1, colsep=c(2), breaks=seq(0,10,length.out=101))
+
+# only retain genes with logFC >= 1 (FC >=2) in at least one sample
+edgeR_innate_common_FC_filtered <- edgeR_innate_common_FC[rowSums(edgeR_innate_common_FC >= 1) >= 1, ]
+heatmap.2(as.matrix(edgeR_innate_common_FC_filtered), Colv=FALSE, Rowv=TRUE, dendrogram="none",
+          trace="none", margins=c(10,10), density.info="none", col=hmcol,
+          cexCol=1, colsep=c(2), breaks=seq(0,10,length.out=101))
+
+
+# PR8-unique sets #
+innate_immune_PR8uni_geneID <- edgeR_GO_ui_top5[edgeR_GO_ui_top5$Term == "innate immune response", "Genes"][2]
+innate_immune_PR8uni_geneID <- strsplit(innate_immune_PR8uni_geneID, split=", ")[[1]]
+innate_immune_PR8uni_geneID <- unique(innate_immune_PR8uni_geneID)
+innate_immune_PR8uni_geneName <- mouse_geneid_name_list[mouse_geneid_name_list$Geneid %in% innate_immune_PR8uni_geneID, "Genename"]
+
+edgeR_innate_PR8uni_FC <- edgeR_DEG[edgeR_DEG$Geneid %in% innate_immune_PR8uni_geneID, ]
+rownames(edgeR_innate_PR8uni_FC) <- edgeR_innate_PR8uni_FC$Genename
+edgeR_innate_PR8uni_FC$Geneid <- NULL
+edgeR_innate_PR8uni_FC$Genename <- NULL
+edgeR_innate_PR8uni_FC[is.na(edgeR_innate_PR8uni_FC)] <- 0
+# remove ALR_PR8 column
+edgeR_innate_PR8uni_FC$ALR_PR8 <- NULL
+
+hmcol <- colorRampPalette(brewer.pal(9, "Reds"))(100)
+heatmap.2(as.matrix(edgeR_innate_PR8uni_FC), Colv=FALSE, Rowv=TRUE, dendrogram="none",
+          trace="none", margins=c(10,10), density.info="none", col=hmcol,
+          cexCol=1, colsep=c(2), breaks=seq(0,10,length.out=101))
+
+# only retain genes with logFC >= 1 (FC >=2) in at least one sample
+edgeR_innate_PR8uni_FC_filtered <- edgeR_innate_PR8uni_FC[rowSums(edgeR_innate_PR8uni_FC >= 1) >= 1, ]
+heatmap.2(as.matrix(edgeR_innate_PR8uni_FC_filtered), Colv=FALSE, Rowv=TRUE, dendrogram="none",
+          trace="none", margins=c(10,10), density.info="none", col=hmcol,
+          cexCol=1, colsep=c(2), breaks=seq(0,10,length.out=101))
+
+
+# Inflammatory response genes FC #
+# Shared sets #
+inflammatory_common_geneID <- edgeR_GO_ui_top5[edgeR_GO_ui_top5$Term == "inflammatory response", "Genes"][1]
+inflammatory_common_geneID <- strsplit(inflammatory_common_geneID, split=", ")[[1]]
+inflammatory_common_geneID <- unique(inflammatory_common_geneID)
+inflammatory_common_geneName <- mouse_geneid_name_list[mouse_geneid_name_list$Geneid %in% inflammatory_common_geneID, "Genename"]
+
+edgeR_inflammatory_common_FC <- edgeR_DEG[edgeR_DEG$Geneid %in% inflammatory_common_geneID, ]
+rownames(edgeR_inflammatory_common_FC) <- edgeR_inflammatory_common_FC$Genename
+edgeR_inflammatory_common_FC$Geneid <- NULL
+edgeR_inflammatory_common_FC$Genename <- NULL
+edgeR_inflammatory_common_FC[is.na(edgeR_inflammatory_common_FC)] <- 0
+# remove ALR_PR8 column
+edgeR_inflammatory_common_FC$ALR_PR8 <- NULL
+
+hmcol <- colorRampPalette(brewer.pal(9, "Reds"))(100)
+heatmap.2(as.matrix(edgeR_inflammatory_common_FC), Colv=FALSE, Rowv=TRUE, dendrogram="none",
+          trace="none", margins=c(10,10), density.info="none", col=hmcol,
+          cexCol=1, colsep=c(2), breaks=seq(0,10,length.out=101))
+
+# only retain genes with logFC >= 1 (FC >=2) in at least one sample
+edgeR_inflammatory_common_FC_filtered <- edgeR_inflammatory_common_FC[rowSums(edgeR_inflammatory_common_FC >= 1) >= 1, ]
+heatmap.2(as.matrix(edgeR_inflammatory_common_FC_filtered), Colv=FALSE, Rowv=TRUE, dendrogram="none",
+          trace="none", margins=c(10,10), density.info="none", col=hmcol,
+          cexCol=1, colsep=c(2), breaks=seq(0,10,length.out=101))
+
+# PR8-unique sets #
+inflammatory_PR8uni_geneID <- edgeR_GO_ui_top5[edgeR_GO_ui_top5$Term == "inflammatory response", "Genes"][2]
+inflammatory_PR8uni_geneID <- strsplit(inflammatory_PR8uni_geneID, split=", ")[[1]]
+inflammatory_PR8uni_geneID <- unique(inflammatory_PR8uni_geneID)
+inflammatory_PR8uni_geneName <- mouse_geneid_name_list[mouse_geneid_name_list$Geneid %in% inflammatory_PR8uni_geneID, "Genename"]
+
+edgeR_inflammatory_PR8uni_FC <- edgeR_DEG[edgeR_DEG$Geneid %in% inflammatory_PR8uni_geneID, ]
+rownames(edgeR_inflammatory_PR8uni_FC) <- edgeR_inflammatory_PR8uni_FC$Genename
+edgeR_inflammatory_PR8uni_FC$Geneid <- NULL
+edgeR_inflammatory_PR8uni_FC$Genename <- NULL
+edgeR_inflammatory_PR8uni_FC[is.na(edgeR_inflammatory_PR8uni_FC)] <- 0
+# remove ALR_PR8 column
+edgeR_inflammatory_PR8uni_FC$ALR_PR8 <- NULL
+
+hmcol <- colorRampPalette(brewer.pal(9, "Reds"))(100)
+heatmap.2(as.matrix(edgeR_inflammatory_PR8uni_FC), Colv=FALSE, Rowv=TRUE, dendrogram="none",
+          trace="none", margins=c(10,10), density.info="none", col=hmcol,
+          cexCol=1, colsep=c(2), breaks=seq(0,10,length.out=101))
+
+# only retain genes with logFC >= 1 (FC >=2) in at least one sample
+edgeR_inflammatory_PR8uni_FC_filtered <- edgeR_inflammatory_PR8uni_FC[rowSums(edgeR_inflammatory_PR8uni_FC >= 1) >= 1, ]
+heatmap.2(as.matrix(edgeR_inflammatory_PR8uni_FC_filtered), Colv=FALSE, Rowv=TRUE, dendrogram="none",
+          trace="none", margins=c(10,10), density.info="none", col=hmcol,
+          cexCol=1, colsep=c(2), breaks=seq(0,10,length.out=101))
+
+```
+
+
+
+###### miRNA ######
+```{r warning=FALSE, message=FALSE}
+setwd("~/Documents/Mice_DI_infection_ExtendedExperiments_2019-2020/miRNA/")
+```
+
+#### Load and clean data ####
+```{r warning=FALSE, message=FALSE}
+mapping_summary <- read.csv("QIAgen_GeneGlobe_results/miRNA_GeneGlobe_summary.csv", stringsAsFactors=FALSE)
+miRNA_matrix <- read.csv("QIAgen_GeneGlobe_results/miRNA_GeneGlobe_miRNA_piRNA_matrix.csv", stringsAsFactors=FALSE)
+metadata <- read.csv("../sequencing_analysis_sample_metadata.csv", stringsAsFactors=FALSE)
+
+rownames(mapping_summary) <- mapping_summary$read.set
+mapping_summary$read.set <- NULL
+
+# Extract miRNA data
+miRNA_matrix <- miRNA_matrix[1:1880, ]
+
+# Clean the miRNA data
+rownames(miRNA_matrix) <- miRNA_matrix$miRNA
+miRNA_matrix$miRNA <- NULL
+miRNA_matrix_UMIs <- miRNA_matrix[, 1:36]
+miRNA_matrix_reads <- miRNA_matrix[, 37:72]
+
+colnames(mapping_summary) <- gsub("HCCCVBGXF_n01_", "", colnames(mapping_summary))
+colnames(miRNA_matrix_UMIs) <- gsub("HCCCVBGXF_n01_", "", colnames(miRNA_matrix_UMIs))
+colnames(miRNA_matrix_reads) <- gsub("HCCCVBGXF_n01_", "", colnames(miRNA_matrix_reads))
+colnames(miRNA_matrix_UMIs) <- gsub(".UMIs", "", colnames(miRNA_matrix_UMIs))
+colnames(miRNA_matrix_reads) <- gsub(".READs", "", colnames(miRNA_matrix_reads))
+
+# Re-order samples in summary and matrix
+metadata$cond <- paste(metadata$Strain, metadata$Virus, metadata$Sex, sep="-")
+metadata$cond <- factor(metadata$cond, levels=unique(metadata$cond))
+colnames(miRNA_matrix_UMIs) <- gsub("_", "-", colnames(miRNA_matrix_UMIs))
+colnames(miRNA_matrix_reads) <- gsub("_", "-", colnames(miRNA_matrix_reads))
+miRNA_matrix_UMIs <- miRNA_matrix_UMIs[, match(metadata$Sample.ID, colnames(miRNA_matrix_UMIs))]
+miRNA_matrix_reads <- miRNA_matrix_reads[, match(metadata$Sample.ID, colnames(miRNA_matrix_reads))]
+
+# Clean data type
+miRNA_matrix_UMIs <- apply(miRNA_matrix_UMIs, 2, function(x) gsub(",", "", x))
+miRNA_matrix_reads <- apply(miRNA_matrix_reads, 2, function(x) gsub(",", "", x))
+miRNA_id <- rownames(miRNA_matrix_UMIs)
+identical(miRNA_id, rownames(miRNA_matrix_reads)) # should return TRUE
+miRNA_matrix_UMIs <- as.data.frame(apply(miRNA_matrix_UMIs, 2, function(x) as.numeric(x)))
+miRNA_matrix_reads <- as.data.frame(apply(miRNA_matrix_reads, 2, function(x) as.numeric(x)))
+rownames(miRNA_matrix_UMIs) <- miRNA_id
+rownames(miRNA_matrix_reads) <- miRNA_id
+
+```
+
+
+
+#### Check the number of UMIs and reads for each sample ####
+```{r warning=FALSE, message=FALSE}
+miRNA_UMI_sum <- data.frame(colSums(miRNA_matrix_UMIs))
+miRNA_reads_sum <- data.frame(colSums(miRNA_matrix_reads))
+miRNA_UMI_reads_sum <- cbind(miRNA_UMI_sum, miRNA_reads_sum)
+colnames(miRNA_UMI_reads_sum) <- c("UMIs", "reads")
+
+lm_eqn <- function(df){
+  m <- lm(reads ~ UMIs, df);
+  eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
+                   list(a=format(unname(coef(m)[1]), digits=2),
+                        b=format(unname(coef(m)[2]), digits=2),
+                        r2=format(summary(m)$r.squared, digits=3)))
+  as.character(as.expression(eq));
+}
+
+ggplot(miRNA_UMI_reads_sum, aes(x=UMIs, y=reads)) +
+  geom_point(size=3) +
+  geom_smooth(method=lm, se=FALSE) +
+  geom_text(x=7500000, y=9500000, label=lm_eqn(miRNA_UMI_reads_sum), parse=TRUE, size=5) +
+  theme(text=element_text(size=15),
+        panel.background=element_rect(fill="transparent", color="grey90"),
+        panel.grid.major=element_line(color="grey90")) +
+  labs(x="Number of UMIs", y="Number of reads")
+
+```
+
+
+
+#### Check the similarity between UMI and read data for each sample by sample distance ####
+```{r warning=FALSE, message=FALSE}
+## Prepare DESeq2 dataset ##
+# Prepare input data
+miRNA_matrix_UMIs_tmp <- miRNA_matrix_UMIs
+miRNA_matrix_reads_tmp <- miRNA_matrix_reads
+colnames(miRNA_matrix_UMIs_tmp) <- paste(colnames(miRNA_matrix_UMIs_tmp), ".UMI", sep="")
+colnames(miRNA_matrix_reads_tmp) <- paste(colnames(miRNA_matrix_reads_tmp), ".Read", sep="")
+identical(rownames(miRNA_matrix_UMIs_tmp), rownames(miRNA_matrix_reads_tmp)) # should return TRUE
+miRNA_matrix <- cbind(miRNA_matrix_UMIs_tmp, miRNA_matrix_reads_tmp)
+miRNA_matrix_geneid <- rownames(miRNA_matrix)
+miRNA_matrix <- as.data.frame(apply(miRNA_matrix, 2, function(x) as.integer(x)))
+rownames(miRNA_matrix) <- miRNA_matrix_geneid
+miRNA_matrix <- as.matrix(miRNA_matrix)
+
+metadata_tmp <- metadata
+metadata_tmp2 <- metadata
+metadata_tmp$Sample.ID <- paste(metadata_tmp$Sample.ID, ".UMI", sep="")
+metadata_tmp2$Sample.ID <- paste(metadata_tmp2$Sample.ID, ".Read", sep="")
+metadata_all <- rbind(metadata_tmp, metadata_tmp2) 
+rm(metadata_tmp, metadata_tmp2)
+rownames(metadata_all) <- metadata_all$Sample.ID
+metadata_all$cond <- gsub("-", "_", metadata_all$cond)
+metadata_all$cond <- gsub("/", "", metadata_all$cond)
+metadata_all$cond <- factor(metadata_all$cond, levels=unique(metadata_all$cond))
+
+all(rownames(metadata_all) == colnames(miRNA_matrix))
+# Should return "TRUE"
+
+# construct a DESeqData
+dds_miRNAall <- DESeqDataSetFromMatrix(countData=miRNA_matrix, 
+                                       colData=metadata_all, 
+                                       design= ~ cond)
+
+# Add additional feature data, e.g. gene names
+featureData <- as.data.frame(rownames(miRNA_matrix))
+colnames(featureData) <- "Geneid"
+rownames(featureData) <- featureData$Geneid
+
+mcols(dds_miRNAall) <- DataFrame(mcols(dds_miRNAall), featureData)
+mcols(dds_miRNAall)
+
+# Pre-filtering based on cpm
+mean(colSums(miRNA_matrix)) 
+miRNA_matrix_cpm <- cpm(miRNA_matrix) 
+
+# We will use cpm=1 as threshold and at least in two samples
+miRNA_matrix_keep <- rowSums(miRNA_matrix_cpm >= 1) >= 2
+
+dds_miRNAall <- dds_miRNAall[miRNA_matrix_keep, ]
+
+nrow(dds_miRNAall) 
+
+# Check factor levels
+# Change it later
+
+# The vst and varlance stabilizing transformations
+dds_miRNAall_vst <- varianceStabilizingTransformation(dds_miRNAall, blind=FALSE, fitType="parametric")
+head(assay(dds_miRNAall_vst), 3)
+
+# Estimate size factor
+dds_miRNAall <- estimateSizeFactors(dds_miRNAall)
+
+# Sample-to-sample Euclidean distance 
+sampleDists_miRNAall <- dist(t(assay(dds_miRNAall_vst)))
+sampleDists_miRNAall
+
+sampleDistMatrix_miRNAall <- as.matrix(sampleDists_miRNAall)
+colnames(sampleDistMatrix_miRNAall) <- NULL
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+pheatmap(sampleDistMatrix_miRNAall,
+         clustering_distance_rows=sampleDists_miRNAall,
+         clustering_distance_cols=sampleDists_miRNAall,
+         col=colors,
+         fontsize=10)
+
+# Sample-to-sample Poisson distances
+poisd_miRNAall <- PoissonDistance(t(counts(dds_miRNAall)))
+
+samplePoisDistMatrix_miRNAall <- as.matrix(poisd_miRNAall$dd)
+rownames(samplePoisDistMatrix_miRNAall) <- colnames(miRNA_matrix)
+pheatmap(samplePoisDistMatrix_miRNAall,
+         clustering_distance_rows=poisd_miRNAall$dd,
+         clustering_distance_cols=poisd_miRNAall$dd,
+         col=colors,
+         fontsize=10)
+
+# PCA plot
+pcaData_miRNAall <- plotPCA(dds_miRNAall_vst, intgroup=c("Strain", "Sex", "Virus", "Sample.ID", "cond"), returnData=TRUE)
+percentVar_miRNAall <- round(100 * attr(pcaData_miRNAall, "percentVar"))
+pcaData_miRNAall$data_type <- factor(c(rep("UMI", 36), rep("Read", 36)), levels=c("UMI", "Read"))
+
+ggplot(pcaData_miRNAall, aes(PC1, PC2, color=cond, shape=data_type)) +
+  geom_jitter(size=5, alpha=0.8) +
+  xlab(paste0("PC1: ", percentVar_miRNAall[1],"% variance")) +
+  ylab(paste0("PC2: ", percentVar_miRNAall[2],"% variance")) +
+  labs(color="Condition", shape="Data type") +
+  scale_color_manual(values=c(rep("#1D4E89", 2), rep("#F77F00", 2), rep("#5E548E", 2),
+                              rep("#00B2CA", 2), rep("#FCBF49", 2), rep("#9F86C0", 2),
+                              rep("#7DCFB6", 2), rep("gold", 2), rep("#E0B1CB", 2))) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+# MDS plot
+mds_miRNAall <- as.data.frame(colData(dds_miRNAall_vst))  %>% cbind(cmdscale(sampleDistMatrix_miRNAall))
+mds_miRNAall$data_type <- factor(c(rep("UMI", 36), rep("Read", 36)), levels=c("UMI", "Read"))
+
+ggplot(mds_miRNAall, aes(x=`1`, y=`2`, color=cond, shape=data_type)) +
+  geom_jitter(size=5, alpha=0.8) +
+  labs(color="Condition", shape="Data type", x="MDS_1", y="MDS_2") +
+  scale_color_manual(values=c(rep("#1D4E89", 2), rep("#F77F00", 2), rep("#5E548E", 2),
+                              rep("#00B2CA", 2), rep("#FCBF49", 2), rep("#9F86C0", 2),
+                              rep("#7DCFB6", 2), rep("gold", 2), rep("#E0B1CB", 2))) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+```
+
+
+
+#### Check the percentage of reads in each category - Part of QC ####
+```{r warning=FALSE, message=FALSE}
+mapping_summary_subset <- mapping_summary[, 2:ncol(mapping_summary)]
+mapping_summary_subset <- as.data.frame(prop.table(as.matrix(mapping_summary_subset), margin=1))
+mapping_summary_subset <- 100 * mapping_summary_subset
+mapping_summary_subset$sampleID <- rownames(mapping_summary_subset)
+mapping_summary_subset_melt <- melt(mapping_summary_subset, id.vars="sampleID")
+mapping_summary_subset_melt$sampleID <- factor(mapping_summary_subset_melt$sampleID, levels=mapping_summary_subset$sampleID)
+mapping_summary_subset_melt$variable <- factor(mapping_summary_subset_melt$variable, levels=colnames(mapping_summary_subset)[1:12])
+
+ggplot(mapping_summary_subset_melt, aes(x=sampleID, y=value)) +
+  geom_bar(stat="identity", fill="deepskyblue3") +
+  facet_wrap(~variable, nrow=length(unique(mapping_summary_subset_melt$variable))) +
+  theme(text=element_text(size=15),
+        panel.background=element_rect(fill="transparent", color="grey90"),
+        panel.grid.major=element_line(color="grey90"),
+        axis.text.x=element_text(angle=90)) +
+  labs(x="Sample ID", y="Percentage of reads")
+ggplot(mapping_summary_subset_melt, aes(x=sampleID, y=value, fill=variable)) +
+  geom_bar(stat="identity") +
+  theme(text=element_text(size=15),
+        panel.background=element_rect(fill="transparent", color="grey90"),
+        panel.grid.major=element_line(color="grey90"),
+        axis.text.x=element_text(angle=90)) +
+  labs(x="Sample ID", y="Percentage of reads", fill="Category") +
+  scale_fill_brewer(palette="Set3")
+
+# Clean up the environment
+rm(miRNA_matrix_reads_tmp, miRNA_matrix_UMIs_tmp, piRNA_matrix_reads_tmp, piRNA_matrix_UMIs_tmp)
+rm(sampleDistMatrix_miRNAall, sampleDistMatrix_piRNAall, samplePoisDistMatrix_miRNAall, samplePoisDistMatrix_piRNAall)
+rm(dds_miRNAall, dds_miRNAall_vst, dds_piRNAall, dds_piRNAall_vst, featureData, mapping_summary, mapping_summary_adj, mapping_summary_id, mapping_summary_subset, mapping_summary_subset_melt, mds_miRNAall, mds_piRNAall, metadata_all)
+rm(miRNA_matrix_cpm, miRNA_reads_sum, miRNA_UMI_reads_sum, miRNA_UMI_sum, pcaData_miRNAall, pcaData_piRNAall, piRNA_matrix_cpm, piRNA_reads_sum, piRNA_UMI_reads_sum, piRNA_UMI_sum, poisd_miRNAall, poisd_piRNAall)
+rm(colors, miRNA_matrix_geneid, miRNA_matrix_keep, percentVar_miRNAall, percentVar_piRNAall, piRNA_matrix_geneid, piRNA_matrix_keep, sampleDists_miRNAall, sampleDists_piRNAall, lm_eqn)
+
+```
+
+
+
+#### miRNA DEG analysis for each mouse strain using UMI data ####
+```{r warning=FALSE, message=FALSE}
+rownames(metadata) <- metadata$Sample.ID
+metadata$cond <- NULL
+metadata$cond1 <- paste(metadata$Strain, metadata$Virus, sep="_")
+metadata$cond1 <- gsub("/", "", metadata$cond1)
+metadata$Virus <- factor(metadata$Virus, levels=c("Mock", "WT", "DI"))
+
+# Separate data for each mouse strain
+miRNA_matrix_UMIs_AR <- miRNA_matrix_UMIs[, 1:14]
+miRNA_matrix_UMIs_LR <- miRNA_matrix_UMIs[, 15:27]
+miRNA_matrix_UMIs_LAR <- miRNA_matrix_UMIs[, 28:36]
+metadata_AR <- metadata[1:14, ]
+metadata_LR <- metadata[15:27, ]
+metadata_LAR <- metadata[28:36, ]
+
+```
+
+#### DESeq2 - initial visualization within mouse strains ####
+```{r warning=FALSE, message=FALSE}
+## Prepare DESeq2 dataset ##
+# Prepare input data
+all(rownames(metadata_AR) == colnames(miRNA_matrix_UMIs_AR)) 
+all(rownames(metadata_LR) == colnames(miRNA_matrix_UMIs_LR)) 
+all(rownames(metadata_LAR) == colnames(miRNA_matrix_UMIs_LAR)) 
+
+# construct a DESeqData
+AR_mice_miRNA_dds <- DESeqDataSetFromMatrix(countData=miRNA_matrix_UMIs_AR, 
+                                            colData=metadata_AR, 
+                                            design= ~ Virus)
+LR_mice_miRNA_dds <- DESeqDataSetFromMatrix(countData=miRNA_matrix_UMIs_LR, 
+                                            colData=metadata_LR, 
+                                            design= ~ Virus)
+LAR_mice_miRNA_dds <- DESeqDataSetFromMatrix(countData=miRNA_matrix_UMIs_LAR, 
+                                             colData=metadata_LAR, 
+                                             design= ~ Virus)
+
+## Pre-filtering ##
+mean(colSums(miRNA_matrix_UMIs_AR)) 
+mean(colSums(miRNA_matrix_UMIs_LR)) 
+mean(colSums(miRNA_matrix_UMIs_LAR))
+miRNA_matrix_UMIs_AR_cpm <- cpm(miRNA_matrix_UMIs_AR) 
+miRNA_matrix_UMIs_LR_cpm <- cpm(miRNA_matrix_UMIs_LR) 
+miRNA_matrix_UMIs_LAR_cpm <- cpm(miRNA_matrix_UMIs_LAR) 
+
+# We will use cpm=1 as threshold and at least in two samples
+AR_mice_miRNA_keep <- rowSums(miRNA_matrix_UMIs_AR_cpm >= 1) >= 2
+LR_mice_miRNA_keep <- rowSums(miRNA_matrix_UMIs_LR_cpm >= 1) >= 2
+LAR_mice_miRNA_keep <- rowSums(miRNA_matrix_UMIs_LAR_cpm >= 1) >= 2
+
+AR_mice_miRNA_dds <- AR_mice_miRNA_dds[AR_mice_miRNA_keep, ]
+LR_mice_miRNA_dds <- LR_mice_miRNA_dds[LR_mice_miRNA_keep, ]
+LAR_mice_miRNA_dds <- LAR_mice_miRNA_dds[LAR_mice_miRNA_keep, ]
+
+nrow(AR_mice_miRNA_dds) 
+nrow(LR_mice_miRNA_dds) 
+nrow(LAR_mice_miRNA_dds)
+
+## Check factor levels ##
+levels(AR_mice_miRNA_dds$Virus)
+levels(LR_mice_miRNA_dds$Virus)
+levels(LAR_mice_miRNA_dds$Virus)
+
+## Variance stabilizing transformations for downstream visualization and clustering ##
+AR_mice_miRNA_vst <- varianceStabilizingTransformation(AR_mice_miRNA_dds, blind=FALSE)
+head(assay(AR_mice_miRNA_vst), 3)
+LR_mice_miRNA_vst <- varianceStabilizingTransformation(LR_mice_miRNA_dds, blind=FALSE)
+head(assay(LR_mice_miRNA_vst), 3)
+LAR_mice_miRNA_vst <- varianceStabilizingTransformation(LAR_mice_miRNA_dds, blind=FALSE)
+head(assay(LAR_mice_miRNA_vst), 3)
+
+## Estimate size factor ##
+AR_mice_miRNA_dds <- estimateSizeFactors(AR_mice_miRNA_dds)
+LR_mice_miRNA_dds <- estimateSizeFactors(LR_mice_miRNA_dds)
+LAR_mice_miRNA_dds <- estimateSizeFactors(LAR_mice_miRNA_dds)
+
+## Sample-to-sample Euclidean distance ##
+AR_mice_miRNA_sampleDists <- dist(t(assay(AR_mice_miRNA_vst)))
+AR_mice_miRNA_sampleDists
+LR_mice_miRNA_sampleDists <- dist(t(assay(LR_mice_miRNA_vst)))
+LR_mice_miRNA_sampleDists
+LAR_mice_miRNA_sampleDists <- dist(t(assay(LAR_mice_miRNA_vst)))
+LAR_mice_miRNA_sampleDists
+
+AR_mice_miRNA_sampleDistMatrix <- as.matrix(AR_mice_miRNA_sampleDists)
+colnames(AR_mice_miRNA_sampleDistMatrix) <- NULL
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+pheatmap(AR_mice_miRNA_sampleDistMatrix,
+         clustering_distance_rows=AR_mice_miRNA_sampleDists,
+         clustering_distance_cols=AR_mice_miRNA_sampleDists,
+         col=colors,
+         fontsize=12)
+
+LR_mice_miRNA_sampleDistMatrix <- as.matrix(LR_mice_miRNA_sampleDists)
+colnames(LR_mice_miRNA_sampleDistMatrix) <- NULL
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+pheatmap(LR_mice_miRNA_sampleDistMatrix,
+         clustering_distance_rows=LR_mice_miRNA_sampleDists,
+         clustering_distance_cols=LR_mice_miRNA_sampleDists,
+         col=colors,
+         fontsize=12)
+
+LAR_mice_miRNA_sampleDistMatrix <- as.matrix(LAR_mice_miRNA_sampleDists)
+colnames(LAR_mice_miRNA_sampleDistMatrix) <- NULL
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+pheatmap(LAR_mice_miRNA_sampleDistMatrix,
+         clustering_distance_rows=LAR_mice_miRNA_sampleDists,
+         clustering_distance_cols=LAR_mice_miRNA_sampleDists,
+         col=colors,
+         fontsize=12)
+
+# Sample-to-sample Poisson distance 
+AR_mice_miRNA_poisd <- PoissonDistance(t(counts(AR_mice_miRNA_dds)))
+LR_mice_miRNA_poisd <- PoissonDistance(t(counts(LR_mice_miRNA_dds)))
+LAR_mice_miRNA_poisd <- PoissonDistance(t(counts(LAR_mice_miRNA_dds)))
+
+AR_mice_miRNA_samplePoisDistMatrix <- as.matrix(AR_mice_miRNA_poisd$dd)
+rownames(AR_mice_miRNA_samplePoisDistMatrix) <- colnames(miRNA_matrix_UMIs_AR)
+colnames(AR_mice_miRNA_samplePoisDistMatrix) <- NULL
+pheatmap(AR_mice_miRNA_samplePoisDistMatrix,
+         clustering_distance_rows=AR_mice_miRNA_poisd$dd,
+         clustering_distance_cols=AR_mice_miRNA_poisd$dd,
+         col=colors,
+         fontsize=12)
+
+LR_mice_miRNA_samplePoisDistMatrix <- as.matrix(LR_mice_miRNA_poisd$dd)
+rownames(LR_mice_miRNA_samplePoisDistMatrix) <- colnames(miRNA_matrix_UMIs_LR)
+colnames(LR_mice_miRNA_samplePoisDistMatrix) <- NULL
+pheatmap(LR_mice_miRNA_samplePoisDistMatrix,
+         clustering_distance_rows=LR_mice_miRNA_poisd$dd,
+         clustering_distance_cols=LR_mice_miRNA_poisd$dd,
+         col=colors,
+         fontsize=12)
+
+LAR_mice_miRNA_samplePoisDistMatrix <- as.matrix(LAR_mice_miRNA_poisd$dd)
+rownames(LAR_mice_miRNA_samplePoisDistMatrix) <- colnames(miRNA_matrix_UMIs_LAR)
+colnames(LAR_mice_miRNA_samplePoisDistMatrix) <- NULL
+pheatmap(LAR_mice_miRNA_samplePoisDistMatrix,
+         clustering_distance_rows=LAR_mice_miRNA_poisd$dd,
+         clustering_distance_cols=LAR_mice_miRNA_poisd$dd,
+         col=colors,
+         fontsize=12)
+
+## PCA plot ##
+AR_mice_miRNA_pcaData <- plotPCA(AR_mice_miRNA_vst, intgroup=c("Virus", "Sex"), returnData=TRUE)
+AR_mice_miRNA_percentVar <- round(100 * attr(AR_mice_miRNA_pcaData, "percentVar"))
+AR_mice_miRNA_pcaData$Sex <- factor(AR_mice_miRNA_pcaData$Sex, levels=c("M", "F"))
+AR_mice_miRNA_pcaData$Virus <- factor(AR_mice_miRNA_pcaData$Virus, levels=c("WT", "DI", "Mock"))
+ggplot(AR_mice_miRNA_pcaData, aes(PC1, PC2, color=Virus, shape=Sex)) +
+  geom_point(size=5) +
+  xlab(paste0("PC1: ", AR_mice_miRNA_percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ", AR_mice_miRNA_percentVar[2],"% variance")) +
+  labs(color="Condition") +
+  scale_color_manual(values=c("#27AAE1", "#FE8500", "#d68adf")) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+LR_mice_miRNA_pcaData <- plotPCA(LR_mice_miRNA_vst, intgroup=c("Virus", "Sex"), returnData=TRUE)
+LR_mice_miRNA_percentVar <- round(100 * attr(LR_mice_miRNA_pcaData, "percentVar"))
+LR_mice_miRNA_pcaData$Sex <- factor(LR_mice_miRNA_pcaData$Sex, levels=c("M", "F"))
+LR_mice_miRNA_pcaData$Virus <- factor(LR_mice_miRNA_pcaData$Virus, levels=c("WT", "DI", "Mock"))
+ggplot(LR_mice_miRNA_pcaData, aes(PC1, PC2, color=Virus, shape=Sex)) +
+  geom_point(size=5) +
+  xlab(paste0("PC1: ", LR_mice_miRNA_percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ", LR_mice_miRNA_percentVar[2],"% variance")) +
+  labs(color="Condition") +
+  scale_color_manual(values=c("#27AAE1", "#FE8500", "#d68adf")) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+LAR_mice_miRNA_pcaData <- plotPCA(LAR_mice_miRNA_vst, intgroup=c("Virus", "Sex"), returnData=TRUE)
+LAR_mice_miRNA_percentVar <- round(100 * attr(LAR_mice_miRNA_pcaData, "percentVar"))
+LAR_mice_miRNA_pcaData$Sex <- factor(LAR_mice_miRNA_pcaData$Sex, levels=c("M", "F"))
+LAR_mice_miRNA_pcaData$Virus <- factor(LAR_mice_miRNA_pcaData$Virus, levels=c("WT", "DI", "Mock"))
+ggplot(LAR_mice_miRNA_pcaData, aes(PC1, PC2, color=Virus, shape=Sex)) +
+  geom_point(size=5) +
+  xlab(paste0("PC1: ", LAR_mice_miRNA_percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ", LAR_mice_miRNA_percentVar[2],"% variance")) +
+  labs(color="Condition") +
+  scale_color_manual(values=c("#27AAE1", "#FE8500", "#d68adf")) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+## MDS plot ##
+AR_mice_miRNA_mds <- as.data.frame(colData(AR_mice_miRNA_vst))  %>% cbind(cmdscale(AR_mice_miRNA_sampleDistMatrix))
+AR_mice_miRNA_mds$Virus <- factor(AR_mice_miRNA_mds$Virus, levels=c("WT", "DI", "Mock"))
+AR_mice_miRNA_mds$Sex <- factor(AR_mice_miRNA_mds$Sex, levels=c("M", "F"))
+ggplot(AR_mice_miRNA_mds, aes(x=`1`, y=`2`, color=Virus, shape=Sex)) +
+  geom_point(size=5) +
+  labs(color="Conditions", x="MDS_1", y="MDS_2") +
+  scale_color_manual(values=c("#27AAE1", "#FE8500", "#d68adf")) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+LR_mice_miRNA_mds <- as.data.frame(colData(LR_mice_miRNA_vst))  %>% cbind(cmdscale(LR_mice_miRNA_sampleDistMatrix))
+LR_mice_miRNA_mds$Virus <- factor(LR_mice_miRNA_mds$Virus, levels=c("WT", "DI", "Mock"))
+LR_mice_miRNA_mds$Sex <- factor(LR_mice_miRNA_mds$Sex, levels=c("M", "F"))
+ggplot(LR_mice_miRNA_mds, aes(x=`1`, y=`2`, color=Virus, shape=Sex)) +
+  geom_point(size=5) +
+  labs(color="Conditions", x="MDS_1", y="MDS_2") +
+  scale_color_manual(values=c("#27AAE1", "#FE8500", "#d68adf")) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+LAR_mice_miRNA_mds <- as.data.frame(colData(LAR_mice_miRNA_vst))  %>% cbind(cmdscale(LAR_mice_miRNA_sampleDistMatrix))
+LAR_mice_miRNA_mds$Virus <- factor(LAR_mice_miRNA_mds$Virus, levels=c("WT", "DI", "Mock"))
+LAR_mice_miRNA_mds$Sex <- factor(LAR_mice_miRNA_mds$Sex, levels=c("M", "F"))
+ggplot(LAR_mice_miRNA_mds, aes(x=`1`, y=`2`, color=Virus, shape=Sex)) +
+  geom_point(size=5) +
+  labs(color="Conditions", x="MDS_1", y="MDS_2") +
+  scale_color_manual(values=c("#27AAE1", "#FE8500", "#d68adf")) +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+```
+
+
+
+#### edgeR - differential expression analysis ####
+```{r warning=FALSE, message=FALSE}
+## Create a DEGList object ##
+AR_mice_miRNA_dgList <- DGEList(counts=counts(AR_mice_miRNA_dds))
+LR_mice_miRNA_dgList <- DGEList(counts=counts(LR_mice_miRNA_dds))
+LAR_mice_miRNA_dgList <- DGEList(counts=counts(LAR_mice_miRNA_dds))
+
+## Filtering ##
+# Skip this step because we got matrix from filtered DESeq2 count matrix
+
+## Normalization - TMM (trimmed mean of M-values (TMM)) ##
+AR_mice_miRNA_dgList <- calcNormFactors(AR_mice_miRNA_dgList, method="TMM")
+LR_mice_miRNA_dgList <- calcNormFactors(LR_mice_miRNA_dgList, method="TMM")
+LAR_mice_miRNA_dgList <- calcNormFactors(LAR_mice_miRNA_dgList, method="TMM")
+
+## Data exploration ##
+plotMDS(AR_mice_miRNA_dgList)
+plotMDS(LR_mice_miRNA_dgList)
+plotMDS(LAR_mice_miRNA_dgList)
+
+## Setting up the Model ##
+AR_mice_miRNA_model <- metadata_AR$Virus
+LR_mice_miRNA_model <- metadata_LR$Virus
+LAR_mice_miRNA_model <- metadata_LAR$Virus
+
+# Add "0+" will change the first contrast from "intercept" to the baseline
+AR_mice_miRNA_designMat <- model.matrix(~ 0 + AR_mice_miRNA_model)
+LR_mice_miRNA_designMat <- model.matrix(~ 0 + LR_mice_miRNA_model)
+LAR_mice_miRNA_designMat <- model.matrix(~ 0 + LAR_mice_miRNA_model)
+
+## Estimating Dispersions ##
+AR_mice_miRNA_dgList <- estimateDisp(AR_mice_miRNA_dgList, design=AR_mice_miRNA_designMat)
+LR_mice_miRNA_dgList <- estimateDisp(LR_mice_miRNA_dgList, design=LR_mice_miRNA_designMat)
+LAR_mice_miRNA_dgList <- estimateDisp(LAR_mice_miRNA_dgList, design=LAR_mice_miRNA_designMat)
+
+##  Differential Expression ##
+AR_mice_miRNA_fit <- glmQLFit(AR_mice_miRNA_dgList, AR_mice_miRNA_designMat)
+LR_mice_miRNA_fit <- glmQLFit(LR_mice_miRNA_dgList, LR_mice_miRNA_designMat)
+LAR_mice_miRNA_fit <- glmQLFit(LAR_mice_miRNA_dgList, LAR_mice_miRNA_designMat)
+
+AR_mice_miRNA_WT_qlf <- glmQLFTest(AR_mice_miRNA_fit, contrast=c(-1,1,0))
+AR_mice_miRNA_DI_qlf <- glmQLFTest(AR_mice_miRNA_fit, contrast=c(-1,0,1))
+LR_mice_miRNA_WT_qlf <- glmQLFTest(LR_mice_miRNA_fit, contrast=c(-1,1,0))
+LR_mice_miRNA_DI_qlf <- glmQLFTest(LR_mice_miRNA_fit, contrast=c(-1,0,1))
+LAR_mice_miRNA_WT_qlf <- glmQLFTest(LAR_mice_miRNA_fit, contrast=c(-1,1,0))
+LAR_mice_miRNA_DI_qlf <- glmQLFTest(LAR_mice_miRNA_fit, contrast=c(-1,0,1))
+
+# Print all the DEGs. 
+AR_mice_miRNA_WT_edgeR <- topTags(AR_mice_miRNA_WT_qlf, sort.by="logFC", p.value=0.05, n=nrow(AR_mice_miRNA_WT_qlf))[["table"]] 
+dim(AR_mice_miRNA_WT_edgeR) 
+
+AR_mice_miRNA_DI_edgeR <- topTags(AR_mice_miRNA_DI_qlf, sort.by="logFC", p.value=0.05, n=nrow(AR_mice_miRNA_DI_qlf))[["table"]] 
+dim(AR_mice_miRNA_DI_edgeR) 
+
+LR_mice_miRNA_WT_edgeR <- topTags(LR_mice_miRNA_WT_qlf, sort.by="logFC", p.value=0.05, n=nrow(LR_mice_miRNA_WT_qlf))[["table"]] 
+dim(LR_mice_miRNA_WT_edgeR) 
+
+LR_mice_miRNA_DI_edgeR <- topTags(LR_mice_miRNA_DI_qlf, sort.by="logFC", p.value=0.05, n=nrow(LR_mice_miRNA_DI_qlf))[["table"]] 
+dim(LR_mice_miRNA_DI_edgeR)
+
+LAR_mice_miRNA_WT_edgeR <- topTags(LAR_mice_miRNA_WT_qlf, sort.by="logFC", p.value=0.05, n=nrow(LAR_mice_miRNA_WT_qlf))[["table"]] 
+dim(LAR_mice_miRNA_WT_edgeR) 
+
+LAR_mice_miRNA_DI_edgeR <- topTags(LAR_mice_miRNA_DI_qlf, sort.by="logFC", p.value=0.05, n=nrow(LAR_mice_miRNA_DI_qlf))[["table"]] 
+dim(LAR_mice_miRNA_DI_edgeR)
+
+## Export DEG lists ##
+write.csv(AR_mice_miRNA_WT_edgeR, file="DEGList/edgeR/AR_mice_miRNA_WT_edgeR.csv")
+write.csv(AR_mice_miRNA_DI_edgeR, file="DEGList/edgeR/AR_mice_miRNA_DI_edgeR.csv")
+write.csv(LR_mice_miRNA_WT_edgeR, file="DEGList/edgeR/LR_mice_miRNA_WT_edgeR.csv")
+write.csv(LR_mice_miRNA_DI_edgeR, file="DEGList/edgeR/LR_mice_miRNA_DI_edgeR.csv")
+write.csv(LAR_mice_miRNA_WT_edgeR, file="DEGList/edgeR/LAR_mice_miRNA_WT_edgeR.csv")
+write.csv(LAR_mice_miRNA_DI_edgeR, file="DEGList/edgeR/LAR_mice_miRNA_DI_edgeR.csv")
+
+rm(AR_mice_miRNA_designMat, AR_mice_miRNA_DI_qlf, AR_mice_miRNA_fit, AR_mice_miRNA_WT_qlf,
+   LAR_mice_miRNA_designMat, LAR_mice_miRNA_DI_qlf, LAR_mice_miRNA_fit, LAR_mice_miRNA_WT_qlf,
+   LR_mice_miRNA_designMat, LR_mice_miRNA_DI_qlf, LR_mice_miRNA_fit, LR_mice_miRNA_WT_qlf, 
+   AR_mice_miRNA_model, LAR_mice_miRNA_model, LR_mice_miRNA_model)
+
+```
+
+
+
+#### Compare DE-miRNAs in each group ####
+```{r warning=FALSE, message=FALSE}
+# obtain the number of DEGs that are up- or down- regulated in each category
+sum(AR_mice_miRNA_WT_edgeR$edgeR_logFC > 0) 
+sum(AR_mice_miRNA_WT_edgeR$edgeR_logFC < 0) 
+sum(AR_mice_miRNA_DI_edgeR$edgeR_logFC > 0) 
+sum(AR_mice_miRNA_DI_edgeR$edgeR_logFC < 0) 
+sum(LR_mice_miRNA_WT_edgeR$edgeR_logFC > 0) 
+sum(LR_mice_miRNA_WT_edgeR$edgeR_logFC < 0) 
+sum(LR_mice_miRNA_DI_edgeR$edgeR_logFC > 0) 
+sum(LR_mice_miRNA_DI_edgeR$edgeR_logFC < 0) 
+
+# get the overlapping of DEGs under WT and DI infection - using consensus lists
+AR_mice_miRNA_edgeR_intersect <- intersect(AR_mice_miRNA_WT_edgeR$Geneid, AR_mice_miRNA_DI_edgeR$Geneid) 
+LR_mice_miRNA_edgeR_intersect <- intersect(LR_mice_miRNA_WT_edgeR$Geneid, LR_mice_miRNA_DI_edgeR$Geneid) 
+intersect(AR_mice_miRNA_edgeR_intersect, LR_mice_miRNA_edgeR_intersect)
+
+# get setdiff 
+AR_mice_miRNA_edgeR_WTunique <- setdiff(AR_mice_miRNA_WT_edgeR$Geneid, AR_mice_miRNA_DI_edgeR$Geneid) 
+AR_mice_miRNA_edgeR_DIunique <- setdiff(AR_mice_miRNA_DI_edgeR$Geneid, AR_mice_miRNA_WT_edgeR$Geneid) 
+LR_mice_miRNA_edgeR_WTunique <- setdiff(LR_mice_miRNA_WT_edgeR$Geneid, LR_mice_miRNA_DI_edgeR$Geneid) 
+LR_mice_miRNA_edgeR_DIunique <- setdiff(LR_mice_miRNA_DI_edgeR$Geneid, LR_mice_miRNA_WT_edgeR$Geneid) 
+
+# other intersect
+intersect(AR_mice_miRNA_edgeR_DIunique, LR_mice_miRNA_edgeR_DIunique) 
+intersect(AR_mice_miRNA_edgeR_WTunique, LR_mice_miRNA_edgeR_WTunique) 
+
+# Draw overlapping and setdiff of 4 conditions in a venn diagram (PR8 and DI222) ##
+library(VennDiagram)
+n12 <- intersect(AR_mice_miRNA_WT_edgeR$Geneid, AR_mice_miRNA_DI_edgeR$Geneid)
+n13 <- intersect(AR_mice_miRNA_WT_edgeR$Geneid, LR_mice_miRNA_WT_edgeR$Geneid)
+n14 <- intersect(AR_mice_miRNA_WT_edgeR$Geneid, LR_mice_miRNA_DI_edgeR$Geneid)
+n23 <- intersect(AR_mice_miRNA_DI_edgeR$Geneid, LR_mice_miRNA_WT_edgeR$Geneid)
+n24 <- intersect(AR_mice_miRNA_DI_edgeR$Geneid, LR_mice_miRNA_DI_edgeR$Geneid)
+n34 <- intersect(LR_mice_miRNA_WT_edgeR$Geneid, LR_mice_miRNA_DI_edgeR$Geneid)
+n123 <- intersect(n12, LR_mice_miRNA_WT_edgeR$Geneid)
+n124 <- intersect(n12, LR_mice_miRNA_DI_edgeR$Geneid)
+n134 <- intersect(n13, LR_mice_miRNA_DI_edgeR$Geneid)
+n234 <- intersect(n23, LR_mice_miRNA_DI_edgeR$Geneid)
+n1234 <- intersect(n12, n34)
+
+draw.quad.venn(length(AR_mice_miRNA_WT_edgeR$Geneid), # 1
+               length(AR_mice_miRNA_DI_edgeR$Geneid), # 2
+               length(LR_mice_miRNA_WT_edgeR$Geneid), # 3
+               length(LR_mice_miRNA_DI_edgeR$Geneid), # 4
+               length(n12), # 12
+               length(n13), # 13
+               length(n14), # 14
+               length(n23), # 23
+               length(n24), # 24
+               length(n34), # 34
+               length(n123), # 123
+               length(n124), # 124
+               length(n134), # 134
+               length(n234), # 234
+               length(n1234), # 1234
+               category=c("IFNAR-/- PR8 infection", "IFNAR-/- DI222+PR8 co-infection",
+                          "IFNLR-/- PR8 infection", "IFNLR-/- DI222+PR8 co-infection"), 
+               cat.pos=c(0, 0, 20, 20), cat.dist = c(0.22, 0.22, 0.11, 0.11),
+               lty=rep("blank", 4), fill=c("#005082", "#fe8761", "#00a8cc", "#fed39f"), alpha=rep(0.5, 4)
+               
+)
+
+```
+
+
+
+#### Plot FC heatmap for a few DE-miRNAs of interest ####
+```{r warning=FALSE, message=FALSE}
+miR_DEGset_FC <- miRNA_edgeR[c("mmu-miR-21a-3p",
+                               "mmu-miR-223-3p", "mmu-miR-223-5p", "mmu-miR-147-5p",
+                               "mmu-miR-449c-5p"), ]
+
+hmcol <- colorRampPalette(brewer.pal(9, "Reds"))(100)
+heatmap.2(as.matrix(miR_DEGset_FC), Colv=FALSE, Rowv=FALSE, dendrogram="none",
+          trace="none", margins=c(10,10), density.info="none", col=hmcol,
+          cexCol=1, colsep=c(2), breaks=seq(0,3,length.out=101))
+
+```
+
+
+
+###### mRNA-miRNA WGCNA network analysis ######
+```{r warning=FALSE, message=FALSE}
+setwd("~/Documents/Mice_DI_infection_ExtendedExperiments_2019-2020/WGCNA")
+
+```
+
+#### Data input and cleaning ####
+```{r warning=FALSE, message=FALSE}
+## Metadata ##
+metadata <- read.csv("../sequencing_analysis_sample_metadata.csv", stringsAsFactors=FALSE)
+
+## Expression data ##
+data <- read.table("../mRNA/3_featureCount_STARalignment/DIinKOmice_mRNAseq_counts_06132020.txt",
+                   sep="\t", header=TRUE, stringsAsFactors=FALSE)
+colnames(data) <- gsub("...2_STAR_alignment.", "", colnames(data))
+colnames(data) <- gsub(".Aligned.out.bam", "", colnames(data))
+for (i in 7:ncol(data)) {
+  colnames(data)[i] <- strsplit(colnames(data)[i], split="\\.")[[1]][1]
+}
+data <- data[, c(1, 7:ncol(data))]
+colnames(data) <- gsub("_", "-", colnames(data))
+
+rownames(data) <- data$Geneid
+data$Geneid <- NULL
+data <- data[, match(metadata$Sample.ID, colnames(data))]
+
+AR_mice_data <- data[, c(1:14)]
+LR_mice_data <- data[, c(15:27)]
+
+# Exclude viral reads
+AR_mice_data <- AR_mice_data[1:(nrow(AR_mice_data)-8), ]
+LR_mice_data <- LR_mice_data[1:(nrow(LR_mice_data)-8), ]
+
+# Exclude mock samples in AR and LR mouse samples
+AR_mice_data <- AR_mice_data[, metadata[metadata$Strain == "IFNAR" & metadata$Virus != "Mock", "Sample.ID"]]
+LR_mice_data <- LR_mice_data[, metadata[metadata$Strain == "IFNLR" & metadata$Virus != "Mock", "Sample.ID"]]
+
+# Combine AR and LR data
+AR_mice_data$Geneid <- rownames(AR_mice_data)
+LR_mice_data$Geneid <- rownames(LR_mice_data)
+datExpr <- merge(AR_mice_data, LR_mice_data, by="Geneid")
+rownames(datExpr) <- datExpr$Geneid
+datExpr$Geneid <- NULL
+
+
+## miRNA data ##
+miRNA_matrix <- read.csv("../miRNA/QIAgen_GeneGlobe_results/miRNA_GeneGlobe_miRNA_piRNA_matrix.csv", stringsAsFactors=FALSE)
+
+# Extract miRNA #
+miRNA_matrix <- miRNA_matrix[1:1880, ]
+
+# Clean the miRNA data
+rownames(miRNA_matrix) <- miRNA_matrix$miRNA
+miRNA_matrix$miRNA <- NULL
+miRNA_matrix_UMIs <- miRNA_matrix[, 1:36]
+colnames(miRNA_matrix_UMIs) <- gsub("HCCCVBGXF_n01_", "", colnames(miRNA_matrix_UMIs))
+colnames(miRNA_matrix_UMIs) <- gsub(".UMIs", "", colnames(miRNA_matrix_UMIs))
+colnames(miRNA_matrix_UMIs) <- gsub("_", "-", colnames(miRNA_matrix_UMIs))
+miRNA_matrix_UMIs <- miRNA_matrix_UMIs[, match(colnames(datExpr), colnames(miRNA_matrix_UMIs))]
+miRNA_matrix_UMIs <- apply(miRNA_matrix_UMIs, 2, function(x) gsub(",", "", x))
+miRNA_id <- rownames(miRNA_matrix_UMIs)
+miRNA_matrix_UMIs <- as.data.frame(apply(miRNA_matrix_UMIs, 2, function(x) as.numeric(x)))
+rownames(miRNA_matrix_UMIs) <- miRNA_id
+datExpr_miRNA <- miRNA_matrix_UMIs
+
+
+## Gene annotation data ##
+mouse_geneid_name_list <- read.csv("../..//Mice_DI_infection_Mirella_Oct-2018/Expression_data_re-analysis_2020/Mus_musculus.GRCm38.99_geneid-name-list.txt", stringsAsFactors=FALSE)
+colnames(mouse_geneid_name_list) <- c("Geneid", "Genename")
+
+# add miRNA annotation into the gene annotation data 
+miRNA_anno <- data.frame("Geneid"=rownames(datExpr_miRNA),
+                         "Genename"=rownames(datExpr_miRNA),
+                         stringsAsFactors=FALSE)
+gene_anno <- rbind(mouse_geneid_name_list, miRNA_anno)
+
+
+## Clean up trait data ##
+datTraits <- metadata[metadata$Strain != "IFNL/AR" & metadata$Virus != "Mock", ]
+datTraits$Weanling <- NULL
+datTraits$Seq.ID <- NULL
+rownames(datTraits) <- datTraits$Sample.ID
+identical(rownames(datTraits), colnames(datExpr)) 
+identical(rownames(datTraits), colnames(datExpr_miRNA)) 
+datTraits$Sample.ID <- NULL
+datTraits$Age.at.infection <- NULL
+
+
+## Clean up the environment ##
+rm(AR_mice_data, LR_mice_data, i, miRNA_matrix, miRNA_matrix_UMIs, miRNA_anno, miRNA_id)
+# Note: datExpr, datExpr_miRNA, and datTraits are ready to be used.
+# As well as gene_anno
+
+
+## Checking expression data for excessive missing values and outliers ##
+# Transpose data for the following section
+datExpr <- as.data.frame(t(datExpr))
+datExpr_miRNA <- as.data.frame(t(datExpr_miRNA))
+
+gsg_mRNA <- goodSamplesGenes(datExpr, verbose=3)
+gsg_mRNA$allOK # FALSE -> Then run the following block
+datExpr0 <- datExpr
+if (!gsg_mRNA$allOK)
+{
+  # Optionally, print the gene and sample names that were removed:
+  if (sum(!gsg_mRNA$goodGenes) > 0)
+    printFlush(paste("Removing genes:", paste(names(datExpr)[!gsg_mRNA$goodGenes], collapse=", ")));
+  if (sum(!gsg_mRNA$goodSamples)>0)
+    printFlush(paste("Removing samples:", paste(rownames(datExpr)[!gsg_mRNA$goodSamples], collapse=", ")));
+  # Remove the offending genes and samples from the data:
+  datExpr <- datExpr[gsg_mRNA$goodSamples, gsg_mRNA$goodGenes]
+}
+gsg_mRNA <- goodSamplesGenes(datExpr, verbose=3)
+gsg_mRNA$allOK # should return TRUE
+
+gsg_miRNA <- goodSamplesGenes(datExpr_miRNA, verbose=3)
+gsg_miRNA$allOK # FALSE -> Then run the following block
+datExpr_miRNA0 <- datExpr_miRNA
+if (!gsg_miRNA$allOK)
+{
+  # Optionally, print the gene and sample names that were removed:
+  if (sum(!gsg_miRNA$goodGenes) > 0)
+    printFlush(paste("Removing genes:", paste(names(datExpr_miRNA)[!gsg_miRNA$goodGenes], collapse=", ")));
+  if (sum(!gsg_miRNA$goodSamples)>0)
+    printFlush(paste("Removing samples:", paste(rownames(datExpr_miRNA)[!gsg_miRNA$goodSamples], collapse=", ")));
+  # Remove the offending genes and samples from the data:
+  datExpr_miRNA <- datExpr_miRNA[gsg_miRNA$goodSamples, gsg_miRNA$goodGenes]
+}
+gsg_miRNA <- goodSamplesGenes(datExpr_miRNA, verbose=3)
+gsg_miRNA$allOK # should return TRUE
+
+# Transpose data back 
+datExpr <- as.data.frame(t(datExpr))
+datExpr_miRNA <- as.data.frame(t(datExpr_miRNA))
+
+
+## Normalize expression data (mRNA and miRNA separately) using DESep2 varianceStabilizingTransformation function ##
+datExpr <- as.matrix(datExpr)
+datExpr <- varianceStabilizingTransformation(datExpr, blind=FALSE, fitType="parametric")
+datExpr <- data.frame(datExpr)
+
+datExpr_miRNA <- as.matrix(datExpr_miRNA)
+datExpr_miRNA <- varianceStabilizingTransformation(datExpr_miRNA, blind=FALSE, fitType="parametric")
+datExpr_miRNA <- data.frame(datExpr_miRNA)
+
+
+## Merge mRNA (datExpr) with miRNA (datExpr_miRNA) data ##
+identical(colnames(datExpr), colnames(datExpr_miRNA)) 
+datExpr <- rbind(datExpr, datExpr_miRNA)
+
+
+## Cluster the samples (in contrast to clustering genes that will come later) to see if there are any obvious outliers ##
+datExpr <- as.data.frame(t(datExpr))
+sampleTree <- hclust(dist(datExpr), method="average")
+plot(sampleTree, main="Sample clustering to detect outliers", sub="", xlab="", cex.lab=1.5, cex.axis=1.5, cex.main=2)
+# No outliers
+
+
+## Reformat the trait data ## 
+# 1) Strain: IFNAR:0; IFNLR:1
+# 2) Sex: M:0; F:1
+# 3) Virus: WT:0; DI:1
+datTraits$Strain <- gsub("IFNAR", "0", datTraits$Strain)
+datTraits$Strain <- gsub("IFNLR", "1", datTraits$Strain)
+datTraits$Sex <- gsub("M", "0", datTraits$Sex)
+datTraits$Sex <- gsub("F", "1", datTraits$Sex)
+datTraits$Virus <- gsub("WT", "0", datTraits$Virus)
+datTraits$Virus <- gsub("DI", "1", datTraits$Virus)
+datTraits$Strain <- as.numeric(datTraits$Strain)
+datTraits$Sex <- as.numeric(datTraits$Sex)
+datTraits$Virus <- as.numeric(datTraits$Virus)
+
+
+## Export normalized expression data and reformated trait data for future use ##
+save(datExpr, datTraits, gene_anno, file="AR_LR_virus-inf_sampls/AR_LR_virus-inf_WGCNA-datExpr-datTraits-geneanno.RData")
+
+
+## Before we continue with network construction and module detection, we visualize how the traits relate to the sample dendrogram ##
+# Re-cluster samples
+sampleTree2 <- hclust(dist(datExpr), method="average")
+# Convert traits to a color representation: white means low, red means high, grey means missing entry
+traitColors <- numbers2colors(datTraits, signed=FALSE)
+# Plot the sample dendrogram and the colors underneath.
+plotDendroAndColors(sampleTree2, traitColors,
+                    groupLabels=colnames(datTraits),
+                    main="Sample dendrogram and trait heatmap")
+
+# Clean up the environment
+rm(data, datExpr0, datExpr_miRNA, datExpr_miRNA0, gsg_miRNA, gsg_mRNA, mouse_geneid_name_list)
+
+```
+
+
+
+#### Network construction and module detection ####
+```{r warning=FALSE, message=FALSE}
+load("AR_LR_virus-inf_sampls_auto/AR_LR_virus-inf_WGCNA-datExpr-datTraits-geneanno.RData")
+### Step-by-step ###
+## Choosing the soft-thresholding power: analysis of network topology ##
+# Choose a set of soft-thresholding powers 
+powers <- c(c(1:10), seq(from=12, to=20, by=2))
+# Call the network topology analysis function
+sft <- pickSoftThreshold(datExpr, powerVector=powers, verbose=5, networkType="signed hybrid")
+# Plot the results:
+sizeGrWindow(9, 5)
+par(mfrow=c(1, 2))
+cex1 <- 0.9
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     xlab="Soft Threshold (power)", ylab="Scale Free Topology Model Fit, signed R^2", type="n",
+     main=paste("Scale independence"))
+text(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     labels=powers, cex=cex1, col="red")
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.9, col="red")
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[, 1], sft$fitIndices[, 5],
+     xlab="Soft Threshold (power)", ylab="Mean Connectivity", type="n",
+     main=paste("Mean connectivity"))
+text(sft$fitIndices[, 1], sft$fitIndices[, 5], labels=powers, cex=cex1, col="red")
+abline(h=100, col="red")
+# Chose power=9
+
+
+## Co-expression similarity and adjacency ##
+## Due to intensive computation tasks for a few functions, the following lines were run on cluster with WGCNA v1.51 ##
+# load("AR_LR_virus-inf_WGCNA-datExpr-datTraits-geneanno.RData")
+softPower <- 9
+adjacency <- adjacency(datExpr, power=softPower, type="signed", corFnc="bicor")
+
+
+## Topological Overlap Matrix (TOM) ##
+# Turn adjacency into topological overlap
+TOM <- TOMsimilarity(adjacency, TOMType="signed")
+dissTOM <- 1 - TOM
+
+
+## Clustering using TOM ##
+# Call the hierarchical clustering function
+geneTree <- hclust(as.dist(dissTOM), method="average")
+
+# save(adjacency, file="adjacency.RData")
+# save(TOM, file="TOM.RData")
+# save(dissTOM, file="dissTOM.RData")
+# save(geneTree, file="geneTree.RData")
+
+
+## Back on local computer ##
+load("AR_LR_virus-inf_sampls_stepwise/geneTree.RData")
+# Plot the resulting clustering tree (dendrogram)
+sizeGrWindow(12, 9)
+plot(geneTree, xlab="", sub="", main="Gene clustering on TOM-based dissimilarity",
+     labels=FALSE, hang=0.04)
+
+
+## Due to intensive computation tasks for a few functions, the following lines were run on cluster with WGCNA v1.51 ##
+# load("dissTOM.RData")
+# load("geneTree.RData")
+# We like large modules, so we set the minimum module size relatively high:
+minModuleSize <- 20
+# Module identification using dynamic tree cut:
+dynamicMods <- cutreeDynamic(dendro=geneTree, minClusterSize=minModuleSize,
+                             method="hybrid", distM=dissTOM,
+                             deepSplit=3, pamStage=TRUE, pamRespectsDendro=TRUE)
+
+# save(dynamicMods, file="dynamicMods.RData")
+
+
+## Back on local computer ##
+load("AR_LR_virus-inf_sampls_stepwise/dynamicMods.RData")
+table(dynamicMods)
+
+# Convert numeric lables into colors
+dynamicColors <- labels2colors(dynamicMods)
+table(dynamicColors)
+# Plot the dendrogram and colors underneath
+sizeGrWindow(8, 6)
+plotDendroAndColors(geneTree, dynamicColors, "Dynamic Tree Cut",
+                    dendroLabels=FALSE, hang=0.03,
+                    addGuide=TRUE, guideHang=0.05,
+                    main="Gene dendrogram and module colors")
+
+
+## Merging of modules whose expression profiles are very similar ##
+# Calculate eigengenes
+MEList <- moduleEigengenes(datExpr, colors=dynamicColors)
+MEs <- MEList$eigengenes
+# Calculate dissimilarity of module eigengenes
+MEDiss <- 1 - cor(MEs)
+# Cluster module eigengenes
+METree <- hclust(as.dist(MEDiss), method="average")
+# Plot the result
+sizeGrWindow(7, 6)
+plot(METree, main="Clustering of module eigengenes", xlab="", sub="")
+
+MEDissThres <- 0.25 # default
+# Plot the cut line into the dendrogram
+abline(h=MEDissThres, col="red")
+# Call an automatic merging function
+merge <- mergeCloseModules(datExpr, dynamicColors, cutHeight=MEDissThres, verbose=3)
+# The merged module colors
+mergedColors <- merge$colors
+# Eigengenes of the new merged modules:
+mergedMEs <- merge$newMEs
+
+# Check what the merging did to the module colors
+sizeGrWindow(12, 9)
+plotDendroAndColors(geneTree, cbind(dynamicColors, mergedColors),
+                    c("Dynamic Tree Cut", "Merged dynamic"),
+                    dendroLabels=FALSE, hang=0.03,
+                    addGuide=TRUE, guideHang=0.05)
+
+
+## Save relevent data ##
+# Rename to moduleColors
+moduleColors <- mergedColors
+# Construct numerical labels corresponding to the colors
+colorOrder <- c("grey", standardColors(50))
+moduleLabels <- match(moduleColors, colorOrder) - 1
+MEs <- mergedMEs
+# Save module colors and labels for use in subsequent parts
+save(MEs, moduleLabels, moduleColors, geneTree, file = "AR_LR_virus-inf_sampls_stepwise/02-networkConstruction-stepByStep.RData")
+
+```
+
+
+
+####  Relating modules to external information and identifying important genes ####
+```{r warning=FALSE, message=FALSE}
+## Quantifying module–trait associations ##
+# Define numbers of genes and samples
+nGenes <- ncol(datExpr)
+nSamples <- nrow(datExpr)
+# Recalculate MEs with color labels
+MEs0 <- moduleEigengenes(datExpr, moduleColors)$eigengenes
+MEs <- orderMEs(MEs0)
+moduleTraitCor <- cor(MEs, datTraits, use="p")
+moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nSamples)
+
+# Calculate corrected p-value 
+moduleTraitAdjPval <- data.frame(matrix(ncol=ncol(moduleTraitPvalue), nrow=nrow(moduleTraitPvalue)),
+                                 stringsAsFactors=FALSE)
+colnames(moduleTraitAdjPval) <- colnames(moduleTraitPvalue)
+rownames(moduleTraitAdjPval) <- rownames(moduleTraitPvalue)
+for (i in 1:ncol(moduleTraitPvalue)) {
+  moduleTraitAdjPval[, i] <- p.adjust(moduleTraitPvalue[, i], method="BH")
+}
+
+sizeGrWindow(10,6)
+# Will display correlations and their p-values
+textMatrix <- paste(signif(moduleTraitCor, 2), "\n(", signif(moduleTraitAdjPval, 1), ")", sep="")
+dim(textMatrix) <- dim(moduleTraitCor)
+par(mar=c(3, 12, 2, 2))
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix=moduleTraitCor,
+               xLabels=colnames(datTraits),
+               yLabels=names(MEs),
+               ySymbols=names(MEs),
+               colorLabels=FALSE,
+               colors=blueWhiteRed(50),
+               textMatrix=textMatrix,
+               setStdMargins=FALSE,
+               cex.text=0.5,
+               zlim=c(-1, 1),
+               main=paste("Module-trait relationships"))
+
+## Export module trait cor and pval ##
+save(moduleTraitCor, moduleTraitPvalue, file="AR_LR_virus-inf_sampls_stepwise/geneinfo_csv/moduleTraitCor-Pvalue.RData")
+save(moduleTraitAdjPval, file="AR_LR_virus-inf_sampls_stepwise/geneinfo_csv/moduleTraitAdjPval.RData")
+
+```
+
+
+
+#### Extract modules with significant cor with each trait ####
+```{r warning=FALSE, message=FALSE}
+mod_strain <- gsub("ME", "", rownames(moduleTraitAdjPval[moduleTraitAdjPval[, 1] <= 0.05, ]))
+mod_virus <- gsub("ME", "", rownames(moduleTraitAdjPval[moduleTraitAdjPval[, 3] <= 0.05, ]))
+# mod_sex is empty
+
+mod_strain <- gsub("ME", "", mod_strain)
+mod_virus <- gsub("ME", "", mod_virus)
+
+
+## Output gene lists for use with online software and services ##
+# Mouse strain associated modules
+module_export_list <- data.frame("modules"=character(), "id"=character(), stringsAsFactors=FALSE)
+module_export_list_miRNA <- data.frame("modules"=character(), "id"=character(), stringsAsFactors=FALSE)
+for (module in mod_strain)
+{
+  # Select module probes
+  modGeneID <- probes[(moduleColors==module)]
+  modGeneID_miRNA <- modGeneID[grepl("mmu-", modGeneID)]
+  modGeneID <- modGeneID[! grepl("mmu-", modGeneID)]
+  modGeneList <- data.frame("sudo_col"=seq(1, length(modGeneID), 1), "id"=modGeneID)
+  modGeneList_miRNA <- data.frame("sudo_col"=seq(1, length(modGeneID_miRNA), 1), "id"=modGeneID_miRNA)
+  colnames(modGeneList)[2] <- module
+  colnames(modGeneList_miRNA)[2] <- module
+  if (nrow(module_export_list) == 0) {
+    module_export_list <- modGeneList
+  } else if (nrow(module_export_list) != 0) {
+    module_export_list <- merge(module_export_list, modGeneList, by="sudo_col", all=TRUE)
+  }
+  if (nrow(module_export_list_miRNA) == 0) {
+    module_export_list_miRNA <- modGeneList_miRNA
+  } else if (nrow(module_export_list_miRNA) != 0) {
+    module_export_list_miRNA <- merge(module_export_list_miRNA, modGeneList_miRNA, by="sudo_col", all=TRUE)
+  }
+}
+module_export_list$sudo_col <- NULL
+module_export_list_miRNA$sudo_col <- NULL
+write.table(module_export_list, "AR_LR_virus-inf_sampls_stepwise/geneinfo_csv/Mouse-strain-associated-modules_GeneID-Name-for-selected-modules_DAVID-input.txt", row.names=FALSE, col.names=TRUE, quote=FALSE, sep="\t")
+write.table(module_export_list_miRNA, "AR_LR_virus-inf_sampls_stepwise/geneinfo_csv/Mouse-strain-associated-modules_miRNA-for-selected-modules.txt", row.names=FALSE, col.names=TRUE, quote=FALSE, sep="\t")
+
+# Virus associated modules
+module_export_list <- data.frame("modules"=character(), "id"=character(), stringsAsFactors=FALSE)
+module_export_list_miRNA <- data.frame("modules"=character(), "id"=character(), stringsAsFactors=FALSE)
+for (module in mod_virus)
+{
+  # Select module probes
+  modGeneID <- probes[(moduleColors==module)]
+  modGeneID_miRNA <- modGeneID[grepl("mmu-", modGeneID)]
+  modGeneID <- modGeneID[! grepl("mmu-", modGeneID)]
+  modGeneList <- data.frame("sudo_col"=seq(1, length(modGeneID), 1), "id"=modGeneID)
+  colnames(modGeneList)[2] <- module
+  
+  if (length(modGeneID_miRNA) == 0) {
+    if (nrow(module_export_list) == 0) {
+      module_export_list <- modGeneList
+    } else if (nrow(module_export_list) != 0) {
+      module_export_list <- merge(module_export_list, modGeneList, by="sudo_col", all=TRUE)
+    }
+  } else {
+    modGeneList_miRNA <- data.frame("sudo_col"=seq(1, length(modGeneID_miRNA), 1), "id"=modGeneID_miRNA)
+    colnames(modGeneList_miRNA)[2] <- module
+    
+    if (nrow(module_export_list) == 0) {
+      module_export_list <- modGeneList
+    } else if (nrow(module_export_list) != 0) {
+      module_export_list <- merge(module_export_list, modGeneList, by="sudo_col", all=TRUE)
+    }
+    if (nrow(module_export_list_miRNA) == 0) {
+      module_export_list_miRNA <- modGeneList_miRNA
+    } else if (nrow(module_export_list_miRNA) != 0) {
+      module_export_list_miRNA <- merge(module_export_list_miRNA, modGeneList_miRNA, by="sudo_col", all=TRUE)
+    }
+  }
+}
+module_export_list$sudo_col <- NULL
+module_export_list_miRNA$sudo_col <- NULL
+write.table(module_export_list, "AR_LR_virus-inf_sampls_stepwise/geneinfo_csv/Virus-associated-modules_GeneID-Name-for-selected-modules_DAVID-input.txt", row.names=FALSE, col.names=TRUE, quote=FALSE, sep="\t")
+write.table(module_export_list_miRNA, "AR_LR_virus-inf_sampls_stepwise/geneinfo_csv/Virus-associated-modules_miRNA-for-selected-modules.txt", row.names=FALSE, col.names=TRUE, quote=FALSE, sep="\t")
+
+```
+
+
+
+#### Plot the GO terms associated with modules related to traits and the cor ####
+```{r warning=FALSE, message=FALSE}
+GO <- read.csv("AR_LR_virus-inf_sampls_stepwise/geneinfo_csv/DAVID_GO/modules_DAVID-GO-BP_summary.csv", stringsAsFactor=FALSE)
+
+## cor with traits heatmap ##
+virus_GOmod <- c("darkslateblue", "brown4", "cyan", "black")
+mouse_GOmod <- c("black")
+
+mod_cor <- as.data.frame(moduleTraitCor[rownames(moduleTraitCor) %in% 
+                                          paste("ME", tolower(unique(as.character(GO$Module))), sep=""), 
+                                        c("Strain", "Virus")])
+rownames(mod_cor) <- gsub("ME", "", rownames(mod_cor))
+mod_cor <- as.data.frame(t(mod_cor))
+mod_cor <- mod_cor[, c("darkslateblue", "brown4", "black", "cyan")]
+
+mod_corpval <- as.data.frame(moduleTraitAdjPval[rownames(moduleTraitAdjPval) %in% 
+                                                 paste("ME", tolower(unique(as.character(GO$Module))), sep=""), 
+                                               c("Strain", "Virus")])
+rownames(mod_corpval) <- gsub("ME", "", rownames(mod_corpval))
+mod_corpval <- as.data.frame(t(mod_corpval))
+mod_corpval <- mod_corpval[, c("darkslateblue", "brown4", "black", "cyan")]
+mod_corpval[1, ] <- c("ns", "ns", "**", "ns")
+mod_corpval[2, ] <- c("**", "**", "*", "**")
+
+cols <- colorRampPalette(brewer.pal(10, "RdBu"))(256)
+heatmap.2(as.matrix(mod_cor), Colv=FALSE, Rowv=FALSE,
+          dendrogram="none", scale="none", col=rev(cols),
+          trace="none", density.info="none", srtCol=0,
+          cellnote=as.matrix(mod_corpval), notecol="white", notecex=2)
+
+
+## Get top10 GO upreg in each category ##
+GO_black <- GO[GO$Module == "Black", "Term"][1:10]
+GO_cyan <- GO[GO$Module == "Cyan", "Term"][1:10]
+GO_brown4 <- GO[GO$Module == "Brown4", "Term"][1:10]
+GO_darkslateblue <- GO[GO$Module == "Darkslateblue", "Term"][1:10]
+
+GO_mod <- union(GO_darkslateblue, GO_brown4)
+GO_mod <- union(GO_mod, GO_black)
+GO_mod <- union(GO_mod, GO_cyan)
+
+GO_mod_top10 <- GO[GO$Term %in% GO_mod, ]
+GO_mod_top10$Module <- tolower(GO_mod_top10$Module)
+GO_mod_top10$Module <- factor(GO_mod_top10$Module, levels=colnames(mod_cor))
+GO_mod_top10 <- GO_mod_top10[order(GO_mod_top10$Module), ]
+GO_mod_top10$Term <- factor(GO_mod_top10$Term, levels=rev(unique(GO_mod_top10$Term)))
+GO_mod_top10$log10Benjamini <- -log10(GO_mod_top10$Benjamini)
+ggplot(GO_mod_top10, aes(x=Module, y=Term, size=X., color=log10Benjamini)) +
+  geom_point() +
+  theme(text=element_text(size=15),
+        panel.background=element_rect(fill="white", color="grey50"),
+        panel.grid.major=element_line(color="grey90"),
+        strip.background=element_blank(),
+        strip.text=element_blank(),
+        axis.text.x=element_text(angle=45, hjust=1)) +
+  labs(x="Module", y="GO biological process", color="-log10(Benjamini)", size="Gene ratio") +
+  scale_size(range=c(1, 10), breaks=c(1, 2, 5, 10, 15), limits=c(0, 15)) +
+  scale_color_gradient2(low="#97d1f4", mid="#74bbe8", high="#0c3e5e")
+
+```
+

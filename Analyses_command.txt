@@ -1,0 +1,457 @@
+#### Bulk mRNA-seq data ####
+## Generate genome index with STAR ##
+module load star/intel/2.7.3a
+
+STAR --runThreadN 12 \
+	--runMode genomeGenerate \
+	--genomeDir reference/Mus.GRCm38.99_PR8_concat_ref-STAR_02032020 \
+	--genomeFastaFiles ../Mus.GRCm38_PR8_concat-refseq.fasta \
+	--sjdbGTFfile ../Mus.GRCm38.99_PR8_concat-annotation.gft \
+	--sjdbOverhang 100
+
+
+## Trimming ##
+module load trimmomatic/0.36
+
+mkdir 1_trimmomatic_trimmed_data
+mkdir 1_trimmomatic_trimmed_data/2020-06-08_HNLNGBGXF
+
+for files in rawdata/2020-06-08_HNLNGBGXF/*_n01*.fastq
+do
+	echo "Processing file $files"
+	input_R2=$(echo $files | sed 's/n01/n02/g')
+	output_R1=$(echo $files | sed 's/rawdata/1_trimmomatic_trimmed_data/g' | sed 's/HNLNGBGXF_n01_//g' | sed 's/\.fastq/\_R1.fastq/g')
+	output_Unpaired_R1=$(echo $files | sed 's/rawdata/1_trimmomatic_trimmed_data/g' | sed 's/HNLNGBGXF_n01_//g' | sed 's/\.fastq/\_Unpaired_R1.fastq/g')
+	output_R2=$(echo $files | sed 's/rawdata/1_trimmomatic_trimmed_data/g' | sed 's/HNLNGBGXF_n01_//g' | sed 's/\.fastq/\_R2.fastq/g')
+	output_Unpaired_R2=$(echo $files | sed 's/rawdata/1_trimmomatic_trimmed_data/g' | sed 's/HNLNGBGXF_n01_//g' | sed 's/\.fastq/\_Unpaired_R2.fastq/g')
+	java -jar $TRIMMOMATIC_JAR PE -phred33 -threads 10 \
+		$files \
+		$input_R2 \
+		$output_R1 \
+		$output_Unpaired_R1 \
+		$output_R2 \
+		$output_Unpaired_R2 \
+		ILLUMINACLIP:/share/apps/trimmomatic/0.36/adapters/TruSeq3-PE-2.fa:2:30:10 SLIDINGWINDOW:4:20 MINLEN:36
+done
+
+mkdir 1_trimmomatic_trimmed_data_all
+mkdir 1_trimmomatic_trimmed_data_all/2020-06-08_HNLNGBGXF
+cp 1_trimmomatic_trimmed_data/2020-06-08_HNLNGBGXF/*.fastq 1_trimmomatic_trimmed_data_all/2020-06-08_HNLNGBGXF/
+
+rm 1_trimmomatic_trimmed_data/2020-06-08_HNLNGBGXF/*_Unpaired*
+
+
+mkdir 1_trimmomatic_trimmed_data/2020-06-11_HHGL7BGXF
+
+for files in rawdata/2020-06-11_HHGL7BGXF/*_n01*.fastq
+do
+	echo "Processing file $files"
+	input_R2=$(echo $files | sed 's/n01/n02/g')
+	output_R1=$(echo $files | sed 's/rawdata/1_trimmomatic_trimmed_data/g' | sed 's/HHGL7BGXF_n01_//g' | sed 's/\.fastq/\_R1.fastq/g')
+	output_Unpaired_R1=$(echo $files | sed 's/rawdata/1_trimmomatic_trimmed_data/g' | sed 's/HHGL7BGXF_n01_//g' | sed 's/\.fastq/\_Unpaired_R1.fastq/g')
+	output_R2=$(echo $files | sed 's/rawdata/1_trimmomatic_trimmed_data/g' | sed 's/HHGL7BGXF_n01_//g' | sed 's/\.fastq/\_R2.fastq/g')
+	output_Unpaired_R2=$(echo $files | sed 's/rawdata/1_trimmomatic_trimmed_data/g' | sed 's/HHGL7BGXF_n01_//g' | sed 's/\.fastq/\_Unpaired_R2.fastq/g')
+	java -jar $TRIMMOMATIC_JAR PE -phred33 -threads 10 \
+		$files \
+		$input_R2 \
+		$output_R1 \
+		$output_Unpaired_R1 \
+		$output_R2 \
+		$output_Unpaired_R2 \
+		ILLUMINACLIP:/share/apps/trimmomatic/0.36/adapters/TruSeq3-PE-2.fa:2:30:10 SLIDINGWINDOW:4:20 MINLEN:36
+done
+
+mkdir 1_trimmomatic_trimmed_data_all/2020-06-11_HHGL7BGXF
+cp 1_trimmomatic_trimmed_data/2020-06-11_HHGL7BGXF/*.fastq 1_trimmomatic_trimmed_data_all/2020-06-11_HHGL7BGXF/
+
+rm 1_trimmomatic_trimmed_data/2020-06-11_HHGL7BGXF/*_Unpaired*
+
+
+## Alignment ##
+module load star/intel/2.7.3a
+
+mkdir 2_STAR_alignment
+cd 2_STAR_alignment
+
+for files in $(ls ../1_trimmomatic_trimmed_data/2020-06-08_HNLNGBGXF/*_R1\.fastq)
+do
+	echo "Processing file $files"
+	input_R2=$(echo $files | sed 's/R1/R2/g')
+	sampleID=$(echo $files | sed 's/..\/1_trimmomatic_trimmed_data\/2020-06-08_HNLNGBGXF\///g' | sed 's/_mRNA//g' | sed 's/_R1.fastq//g')
+	
+	mkdir $sampleID
+	
+	sign_slash='/'
+	sign_dot='.'
+	output=$sampleID$sign_slash$sampleID$sign_dot
+	
+	STAR --runThreadN 20 \
+		--genomeDir reference/Mus.GRCm38.99_PR8_concat_ref-STAR_02032020 \
+		--readFilesIn $files $input_R2 \
+		--outFileNamePrefix $output \
+		--outSAMtype BAM Unsorted
+done
+
+for files in $(ls ../1_trimmomatic_trimmed_data/2020-06-11_HHGL7BGXF/*_R1\.fastq)
+do
+	echo "Processing file $files"
+	input_R2=$(echo $files | sed 's/R1/R2/g')
+	sampleID=$(echo $files | sed 's/..\/1_trimmomatic_trimmed_data\/2020-06-11_HHGL7BGXF\///g' | sed 's/_mRNA//g' | sed 's/_R1.fastq//g')
+	
+	mkdir $sampleID
+	
+	sign_slash='/'
+	sign_dot='.'
+	output=$sampleID$sign_slash$sampleID$sign_dot
+	
+	STAR --runThreadN 20 \
+		--genomeDir reference/Mus.GRCm38.99_PR8_concat_ref-STAR_02032020 \
+		--readFilesIn $files $input_R2 \
+		--outFileNamePrefix $output \
+		--outSAMtype BAM Unsorted
+done
+
+
+## Counting ##
+module load subread/intel/1.5.1
+
+mkdir 3_featureCount_STARalignment
+cd 3_featureCount_STARalignment
+
+featureCounts -p -B -C -T 20 -t exon \
+  -g gene_id \
+  -a reference/Mus_musculus.GRCm38.99_PR8_concat_seq-annotation_02032020/Mus.GRCm38.99_PR8_concat-annotation.gft \
+  -o DIinKOmice_mRNAseq_counts_06132020.txt \
+  ../2_STAR_alignment/*/*.Aligned.out.bam
+
+
+## Split-read analysis ##
+# Sorting and change format
+module load samtools/intel/1.6
+
+for files in ./*/*.Aligned.out.bam
+do
+	echo "Processing file $files"
+	sort_output=$(echo $files | sed 's/bam/sorted\.bam/g')
+	view_output=$(echo $sort_output | sed 's/bam/sam/g')
+	samtools sort -o $sort_output $files
+	samtools view -h $sort_output -o $view_output
+done
+
+
+# Extract viral read alignment
+module load python/intel/2.7.12
+
+mkdir 6_py_IAV_sam
+
+for files in 2_STAR_alignment/*/*Aligned.out.sorted.sam
+do
+	echo "Processing file $files"
+	python python_scripts/filter_IAV_sam.py $files \
+		-g reference/IAV_PR8_seq_annotation_02032020/Influenza_A_H1N1_PR8_refseq.fasta \
+		-od 6_py_IAV_sam/
+done
+for files in 6_py_IAV_sam/*.sam
+do
+	output=$(echo $files | sed 's/sam\.sam/sam/g')
+	mv $files $output
+done
+
+
+# MAPQ filtering
+module load python/intel/2.7.12
+
+mkdir 7_py_IAV_sam_qualfiltered
+
+for files in 6_py_IAV_sam/*.Aligned.out.sorted.sam
+do
+	echo "Processing file $files"
+	python python_scripts/map_qual_filter_forSTARoutput_IAV_sam.py \
+		$files \
+		-od 7_py_IAV_sam_qualfiltered/
+done
+
+
+# Extract CIGAR patterns across dataset
+module load python/intel/2.7.12
+
+python python_scripts/extract_cigar_pattern.py \
+	-indir . -o cigar_patterns_freq.txt
+
+
+# Fetch split-read alignment
+module load python/intel/2.7.12
+
+mkdir 12_py_Virus_gapped_sam_qualfiltered
+for files in 7_py_IAV_sam_qualfiltered/*.sam
+do
+	echo "Processing file $files"
+	output=$(echo $files | sed 's/7\_py\_IAV\_sam\_qualfiltered/12\_py\_Virus\_gapped\_sam\_qualfiltered/g')
+	python python_scripts/Viral_vRNA_split_reads_alignment_sam_fetch_v5_04092020.py \
+		--ref_CDS_position PR8_ref_gene_info.txt \
+		--input_sam_file $files \
+		--output_sam_file $output
+done
+
+
+# Extract split-read info
+module load python/intel/2.7.12
+
+mkdir 13_DI_boundary_extraction
+
+python python_scripts/DI_boundary_characterization_vRNA_1N_04092020.py \
+  12_py_Virus_gapped_sam_qualfiltered/*.sam \
+  -r PR8_ref_seq_id.txt \
+  -m 25 \
+  -sl 0 \
+  -o 13_DI_boundary_extraction/DI1N_DI_records.csv
+  
+python python_scripts/DI_boundary_characterization_allsegments_2N_v6_04092020.py \
+  12_py_Virus_gapped_sam_qualfiltered/*.sam \
+  -r PR8_ref_seq_id.txt \
+  -m 25 \
+  -sl 0 \
+  -o 13_DI_boundary_extraction/DI2N_DI_records.csv
+
+python python_scripts/DI_boundary_characterization_allsegment_3N_v3_04092020.py \
+  12_py_Virus_gapped_sam_qualfiltered/*.sam \
+  -r PR8_ref_seq_id.txt \
+  -m 25 \
+  -sl 0 \
+  -o 13_DI_boundary_extraction/DI3N_DI_records.csv
+    
+python python_scripts/DI_boundary_characterization_allsegment_4N_v2_03192020.py \
+  12_py_Virus_gapped_sam_qualfiltered/*.sam \
+  -r PR8_ref_seq_id.txt \
+  -m 25 \
+  -sl 0 \
+  -o 13_DI_boundary_extraction/DI4N_DI_records.csv
+
+
+## Extract viral transcriptome coverage ##
+# Change format
+module load samtools/intel/1.3.1
+
+mkdir 8_samtools_IAV_qualfiltered_sam2bam
+
+for files in 7_py_IAV_sam_qualfiltered/*.sam
+do
+	echo "Processing file $files"
+	output=$(echo $files | sed 's/7\_py\_IAV\_sam\_qualfiltered/8\_samtools\_IAV\_qualfiltered\_sam2bam/g' | sed 's/Aligned//g' | sed 's/\.sam/\.sorted\.bam/g')
+	samtools view -b $files | samtools sort -o $output
+done
+
+
+# extraction coverage
+module load bedtools/intel/2.26.0
+
+mkdir 9_bedtools_virus_genomecov
+
+for files in 8_samtools_IAV_qualfiltered_sam2bam/*.bam
+do
+	echo "Processing file $files"
+	output=$(echo $files | sed 's/8\_samtools\_IAV\_qualfiltered\_sam2bam/9\_bedtools\_virus\_genomecov/g' | sed 's/\.bam/\.virus\.bed\_genomecov\.txt/g')
+	bedtools genomecov -d -split -ibam $files \
+		-g reference/IAV_PR8_seq_annotation_02032020/Influenza_A_H1N1_PR8_refseq.fasta > \
+		$output
+done
+
+
+
+#### Viral genome sequencing data ####
+## Generate genome index with STAR ##
+module load star/intel/2.7.3a
+
+STAR --runThreadN 12 \
+	--runMode genomeGenerate \
+	--genomeDir reference/IAV_PR8_ref-STAR_02032020 \
+	--genomeFastaFiles ../IAV_PR8_seq_annotation_02032020/Influenza_A_H1N1_PR8_refseq.fasta \
+	--sjdbGTFfile ../IAV_PR8_seq_annotation_02032020/H1N1_PR8_8segs_genes_annotation_full_02032020.gtf \
+	--genomeSAindexNbases 6
+
+
+## Trimming ##
+module load trimmomatic/0.36
+
+for files in rawdata/*_n01*.fastq
+do
+	echo "Processing file $files"
+	input_R2=$(echo $files | sed 's/n01/n02/g')
+	output_R1=$(echo $files | sed 's/rawdata/1_trimmomatic_trimmed_data/g' | sed 's/H5HNMAFX2_n01_//g' | sed 's/\.fastq/\_R1.fastq/g')
+	output_Unpaired_R1=$(echo $files | sed 's/rawdata/1_trimmomatic_trimmed_data/g' | sed 's/H5HNMAFX2_n01_//g' | sed 's/\.fastq/\_Unpaired_R1.fastq/g')
+	output_R2=$(echo $files | sed 's/rawdata/1_trimmomatic_trimmed_data/g' | sed 's/H5HNMAFX2_n01_//g' | sed 's/\.fastq/\_R2.fastq/g')
+	output_Unpaired_R2=$(echo $files | sed 's/rawdata/1_trimmomatic_trimmed_data/g' | sed 's/H5HNMAFX2_n01_//g' | sed 's/\.fastq/\_Unpaired_R2.fastq/g')
+	java -jar $TRIMMOMATIC_JAR PE -phred33 -threads 10 \
+		$files \
+		$input_R2 \
+		$output_R1 \
+		$output_Unpaired_R1 \
+		$output_R2 \
+		$output_Unpaired_R2 \
+		ILLUMINACLIP:/share/apps/trimmomatic/0.36/adapters/NexteraPE-PE.fa:2:30:10 SLIDINGWINDOW:4:20 MINLEN:20
+done
+
+
+## Alignment ##
+module load star/intel/2.7.3a
+
+for files in 1_trimmomatic_trimmed_data/*_rep1_R1.fastq
+do
+	echo "Processing file $files"
+	input_R2=$(echo $files | sed 's/R1/R2/g')
+	outputfile_prefix=$(echo $files | sed 's/1_trimmomatic_trimmed_data/2_STAR_alignment/g' | sed 's/\_rep1_R1.fastq/\_rep1./g')
+	STAR --runThreadN 12 \
+		--genomeDir reference/IAV_PR8_ref-STAR_02032020 \
+		--readFilesIn $files $input_R2 \
+		--outFileNamePrefix $outputfile_prefix \
+		--outSAMtype BAM Unsorted
+done
+
+for files in 1_trimmomatic_trimmed_data/*_rep2_R1.fastq
+do
+	echo "Processing file $files"
+	input_R2=$(echo $files | sed 's/R1/R2/g')
+	outputfile_prefix=$(echo $files | sed 's/1_trimmomatic_trimmed_data/2_STAR_alignment/g' | sed 's/\_rep2_R1.fastq/\_rep2./g')
+	STAR --runThreadN 12 \
+		--genomeDir reference/IAV_PR8_ref-STAR_02032020 \
+		--readFilesIn $files $input_R2 \
+		--outFileNamePrefix $outputfile_prefix \
+		--outSAMtype BAM Unsorted
+done
+
+
+## Sorting and change format ##
+module load samtools/intel/1.6
+
+for files in 2_STAR_alignment/*.bam
+do
+	echo "Processing file $files"
+	output=$(echo $files | sed 's/2_STAR_alignment/3_samtools_sorted_bam_bai/g' | sed 's/\.Aligned.out/\.Aligned.out.sorted/g')
+	samtools sort -o $output $files
+	samtools index $output
+done
+
+for files in 3_samtools_sorted_bam_bai/*.bam
+do
+	echo "Processing file $files"
+	output=$(echo $files | sed 's/3_samtools_sorted_bam_bai/4_samtools_bam2sam/g' | sed 's/\.bam/\.sam/g')
+	samtools view -h $files -o $output
+done
+
+
+## MAPQ filtering ##
+module load python/intel/2.7.12
+
+python python_scripts/map_qual_filter_forSTARoutput_IAV_sam.py \
+	4_samtools_bam2sam/*.sam \
+	-od 5_py_alignment_quality_filtering/
+
+
+## Mark and remove duplicates ##
+module load picard/2.17.11
+
+for files in 5_py_alignment_quality_filtering/*.sam
+do
+	echo "Processing file $files"
+	output_sam=$(echo $files | sed 's/5_py_alignment_quality_filtering/7_Picard_markdup_sam/g' | sed 's/\.sam/\.marked_duplicates.sam/g')
+	output_matrics=$(echo $files | sed 's/5_py_alignment_quality_filtering/7_Picard_markdup_sam/g' | sed 's/\.sam/\.marked_dup_matrics.txt/g')
+	java -jar /share/apps/picard/2.17.11/picard.jar MarkDuplicates \
+		I=$files \
+		O=$output_sam \
+		M=$output_matrics \
+		ASSUME_SORTED=true \
+		REMOVE_DUPLICATES=true
+done
+
+
+## Counting ##
+module load samtools/intel/1.6
+module load subread/intel/1.5.1
+
+for files in 7_Picard_markdup_sam/sam/*.sam
+do
+	echo "Processing file $files"
+	output=$(echo $files | sed 's/7_Picard_markdup_sam\/sam/11_samtools_deduped_sam2sortedbam/g' | sed 's/.marked_duplicates//g' | sed 's/\.sam/\.sorted\.bam/g')
+	samtools view -b $files | samtools sort -o $output
+	samtools index $output
+done
+
+featureCounts -p -B -C -T 20 -t exon \
+  -g gene_id \
+  -a reference/IAV_PR8_seq_annotation_02032020/H1N1_PR8_8segs_genes_annotation_full_02032020.gtf \
+  -o featureCounts.txt \
+  ../11_samtools_deduped_sam2sortedbam/*.bam
+
+
+## Split-read analysis ##
+# Extract CIGAR patterns across dataset
+module load python/intel/2.7.12
+
+python python_scripts/extract_cigar_pattern.py \
+  -indir . \
+  -o cigar_patterns_freq.txt
+
+
+# Fetch split-read alignment
+module load python/intel/2.7.12
+
+mkdir 9_py_Virus_gapped_sam_qualfiltered
+for files in 7_Picard_markdup_sam/sam/*.sam
+do
+	echo "Processing file $files"
+	output=$(echo $files | sed 's/7\_Picard\_markdup\_sam\/sam/9\_py\_Virus\_gapped\_sam\_qualfiltered/g')
+	python python_scripts/Viral_vRNA_split_reads_alignment_sam_fetch_v5_04092020.py \
+		--ref_CDS_position PR8_ref_gene_info.txt \
+		--input_sam_file $files \
+		--output_sam_file $output
+done
+
+
+# Extract split-read info
+module load python/intel/2.7.12
+
+mkdir 10_DI_boundary_extraction
+
+python python_scripts/DI_boundary_characterization_vRNA_1N_04092020.py \
+  9_py_Virus_gapped_sam_qualfiltered/*.sam \
+  -r PR8_ref_seq_id.txt \
+  -m 25 \
+  -sl 0 \
+  -o 10_DI_boundary_extraction/DI1N_DI_records.csv
+  
+python python_scripts/DI_boundary_characterization_allsegments_2N_v6_04092020.py \
+  9_py_Virus_gapped_sam_qualfiltered/*.sam \
+  -r PR8_ref_seq_id.txt \
+  -m 25 \
+  -sl 0 \
+  -o 10_DI_boundary_extraction/DI2N_DI_records.csv
+
+python python_scripts/DI_boundary_characterization_allsegment_3N_v3_04092020.py \
+  9_py_Virus_gapped_sam_qualfiltered/*.sam \
+  -r PR8_ref_seq_id.txt \
+  -m 25 \
+  -sl 0 \
+  -o 10_DI_boundary_extraction/DI3N_DI_records.csv
+    
+python python_scripts/DI_boundary_characterization_allsegment_4N_v2_03192020.py \
+  9_py_Virus_gapped_sam_qualfiltered/*.sam \
+  -r PR8_ref_seq_id.txt \
+  -m 25 \
+  -sl 0 \
+  -o 10_DI_boundary_extraction/DI4N_DI_records.csv
+
+
+## Extract genome coverage ##
+module load bedtools/intel/2.26.0
+
+mkdir 12_final_bedtoolsgenomecov
+
+for files in 11_samtools_deduped_sam2sortedbam/*.bam
+do
+	echo "Processing file $files"
+	output=$(echo $files | sed 's/11_samtools_deduped_sam2sortedbam/12_final_bedtoolsgenomecov/g' | sed 's/\.bam/\.bed_genomecov.txt/g')
+	bedtools genomecov -d -split -ibam $files \
+		-g reference/IAV_PR8_seq_annotation_02032020/Influenza_A_H1N1_PR8_refseq.fasta > $output
+done
+
+
